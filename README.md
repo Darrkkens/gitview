@@ -503,6 +503,101 @@ Limites:
 - **Tamanho**: repositórios com dezenas de milhares de arestas geram arquivos de alguns MB (o pgx, com 40 mil linhas, gera 5,4 MB).
 - **WebGL**: sem ele, a página avisa, e a busca, as listas e os detalhes continuam funcionando.
 
+## Architecture Journey: HTTP Explorer (`gitview graph routes|journey`, aba HTTP do Repository Graph)
+
+Documenta e explora a API Go por análise estática. Para cada rota, mostra:
+
+- onde ela foi registrada;
+- os middlewares (globais, de grupo e da rota) e o handler;
+- os services, repositories e operações SQL que a cadeia pode alcançar;
+- os parâmetros, o corpo e as respostas que o código lê e escreve;
+- um exemplo de requisição em cURL.
+
+Nada é executado: o servidor da aplicação não é iniciado e nenhuma requisição é enviada.
+
+```sh
+gitview graph routes                                  # catálogo por prefixo
+gitview graph routes --format json
+gitview graph journey --route "POST /api/clients" --depth 4
+gitview graph journey --route "route:POST /api/clients@routes/clients.go:42"   # registro exato
+gitview graph export --output architecture.html       # HTML com a aba HTTP
+gitview graph export --format openapi --output openapi.json
+gitview graph export --format postman --output collection.json
+gitview graph export --include-http=false             # sem o catálogo
+```
+
+### Rotas
+
+A descoberta é a do Code Flow (gin, chi, echo, `net/http` e padrões `"GET /x/{id}"` do `ServeMux`), com o que o grafo precisava:
+
+- **Prefixos:** grupos e rotas aninhadas, routers recebidos como parâmetro (inclusive interfaces como `gin.IRoutes`), `chi.Route` e `chi.Mount`. O sub-router montado herda o prefixo e os middlewares do pai.
+- **Ordem dos middlewares:** cada middleware traz o escopo (global, group, router, route) e o local da chamada que o adicionou. No gin, um `Use` que roda depois do registro da rota (ou da criação do grupo) não é aplicado, como no gin real. Quando a ordem depende do caminho, o middleware é marcado `possible`.
+- **Handlers indiretos:** middlewares passados em `Group("/x", mw)` e `chi.With(mw)`, handlers montados por funções auxiliares e por closures que capturam variáveis (`with(h)` → `[]HandlerFunc{user, h}`).
+- **Caminhos dinâmicos:** um caminho calculado em tempo de execução mantém o prefixo constante (`/kinds/{dynamic}`) e é marcado como parcial; nunca vira uma rota inventada.
+
+O ID de uma rota inclui o local do registro: é o mesmo ID do nó do grafo.
+
+### Contratos
+
+O analisador interpreta o SSA da cadeia de cada rota. Ele segue os helpers que recebem valores HTTP (`*gin.Context`, `http.ResponseWriter`, `*http.Request`, `echo.Context`), com os argumentos de cada chamada. Assim, um status passado a `httpx.JSON(w, status, v)`, ou guardado no campo de um `*Error` criado por `NewError(http.StatusNotFound, …)` numa variável de pacote, é resolvido até a constante. O analisador não entra nos services.
+
+| Contrato | Origem reconhecida |
+|---|---|
+| Path | `c.Param`, `r.PathValue`, `chi.URLParam`, `ShouldBindUri` (tags `uri`) e o próprio padrão da rota |
+| Query, header, cookie, form | `c.Query`/`DefaultQuery`/`GetQuery`, `r.URL.Query().Get`, `r.FormValue`, `c.GetHeader`, `r.Header.Get`, `c.Cookie`/`r.Cookie`, `c.PostForm`, `c.FormFile`, `ShouldBindQuery`/`ShouldBindHeader` |
+| Corpo | `ShouldBindJSON`/`BindJSON`/`ShouldBind`/`ShouldBindWith`, `json.NewDecoder(r.Body).Decode` (com `DisallowUnknownFields`), `io.ReadAll(r.Body)` + `json.Unmarshal`, echo `Bind` |
+| Respostas | `c.JSON` e variantes, `AbortWithStatusJSON`, `c.Status`, `c.String`, `c.Data`, `c.Redirect`, `http.Error`, `http.NotFound`, `WriteHeader` + `json.Encoder.Encode`/`Write`, echo `JSON`/`NoContent`/`String` |
+| Autenticação | um middleware (ou o handler) que lê `Authorization` ou um cookie e pode responder 401. O esquema (`bearer`, `basic`) vem do prefixo comparado no código |
+| Servidor | `ListenAndServe`, `http.Server{Addr: …}`, `(*gin.Engine).Run`, echo `Start` |
+
+Como os valores são tratados:
+
+- **Schemas:** seguem as regras do `encoding/json` (tags, `-`, `omitempty`, `,string`, campos promovidos de structs embutidas, `MarshalJSON`/`MarshalText`, `time.Time`).
+- **Obrigatoriedade:** um campo só é obrigatório quando há uma regra `required` que a decodificação aplica. Tags `binding` valem para os binds do gin; tags `validate` valem só quando a cadeia chama o validator. Ponteiros não definem obrigatoriedade.
+- **Respostas:** cada uma traz status, content type, schema, origem (handler ou middleware), a cadeia de helpers até a escrita e a evidência. A base é `static` (status e corpo identificados), `partial` (um deles não) ou `unknown` (nenhum). O 200 implícito do `net/http` aparece como `possible`. Um status calculado em tempo de execução fica indeterminado, nunca é adivinhado.
+- **Mapas literais:** em `gin.H{...}` e `body["code"] = …`, as chaves constantes viram campos, marcando as que só existem em alguns caminhos e os mapas que podem ganhar chaves (`maps.Copy`).
+- **Tipos de parâmetro:** vêm de conversões diretas (`strconv.Atoi(c.Param("id"))` indica inteiro).
+
+### Exemplos, cURL e exportações
+
+- **Exemplos sintéticos:** os valores são determinísticos, escolhidos pelo tipo e pelas regras reconhecidas (`email` → `user@example.com`, `min=2`, `oneof=admin user` → `admin`, `uuid`). Quando há uma regra que o gerador não interpreta, o exemplo é marcado `unverified`. Nenhum dado vem da aplicação ou do banco.
+- **cURL:** usa a base URL do endereço de escuta encontrado no código, ou um placeholder identificado como tal. Credenciais são sempre placeholders (`Bearer <token>`), o escaping é POSIX e o corpo vai em `--data-raw`.
+- **OpenAPI 3.1:** `required` só para regras aplicadas, e `security` só quando o esquema é conhecido. O que não foi identificado fica em extensões `x-gitview-*`, como rotas de caminho dinâmico (`x-gitview-unresolved-routes`), status indeterminados (`default`), autenticação de nome dinâmico e evidências. Os documentos gerados para a fixture de testes e para um projeto real (134 rotas) foram validados contra o schema oficial 3.1.
+- **Postman Collection v2.1:** uma pasta por grupo. Variáveis de caminho, query e headers lidos pelo código, com os opcionais desativados, e o corpo sintético. A base URL fica em `{{baseUrl}}` e o token em `{{token}}`, que começa vazio.
+
+### No HTML
+
+O botão **HTTP** do Repository Graph abre o explorador:
+
+- **Catálogo (esquerda):** busca, filtro por método, agrupamento por prefixo, pacote do handler ou arquivo, e filtros de autenticação e contrato parcial. O painel pode ser recolhido.
+- **Grafo de execução (centro):** a rota, a cadeia de middlewares na ordem de execução e o handler. A partir deles, os services, repositories e o SQL que podem ser chamados, coloridos pela camada do Study Mode (STATIC ou HEURISTIC). A confiança aparece em cada aresta.
+  - Duplo clique expande ou recolhe uma função; a profundidade é ajustável.
+  - Chamadas externas ficam ocultas por padrão.
+  - Recursão aparece no Code Flow (↻).
+- **Detalhes (direita), em abas:**
+  - **Overview:** handler, cadeia, autenticação, camadas e SQL.
+  - **Request:** construtor no estilo Postman (base URL, parâmetros, headers e corpo editáveis, *Example | Schema*), com cURL atualizado ao vivo e os botões *Copy JSON*, *Copy cURL* e *Export*. Não há botão *Send*: a página não envia requisições.
+  - **Response:** cada status com schema, exemplo sintético, origem e base.
+  - **Code Flow:** a árvore do grafo desenhado.
+  - **Evidence:** cada relação com arquivo:linha e confiança.
+- **Navegação:**
+  - Qualquer função abre o Symbol Explorer, com o breadcrumb *Repository › HTTP › rota › função* para voltar.
+  - *◀ Back* (Alt+←) percorre o histórico.
+  - Os painéis de pacote listam as rotas do pacote.
+  - `#route=…&tab=…` funciona como deep link.
+
+A página continua um arquivo único e offline, com a mesma CSP. No HTML, cada item embute até 3 evidências e o total; o JSON (`--format json`) traz todas.
+
+### Limites
+
+- **Análise estática:** um caminho no grafo de execução é um caminho possível, não a execução de uma requisição.
+- **Status:** um status guardado em estruturas indiretas (o campo de uma struct recebida como parâmetro, `errors.As`) fica indeterminado.
+- **Profundidade:** helpers com mais de 6 chamadas de profundidade não são seguidos, e a rota é marcada como parcial.
+- **Fora do alcance:**
+  - frameworks além de gin, chi, echo e `net/http` (a análise é por adaptadores e pode ganhar outros, como o Fiber);
+  - rotas `Static` e `NoRoute` do gin;
+  - binds que dependem de um `Content-Type` decidido em tempo de execução, que aparecem com todos os decodificadores possíveis.
+
 ## Configuração (`.gitview.json` na raiz do repositório)
 
 ```json
@@ -548,7 +643,7 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/live/srcmap` | Source Mapper: quadros, rotas e chamadas SQL → símbolos do Code Flow e operações do SQL Explorer |
 | `internal/live/capture` | Sessões de captura (fases, pausa, limites) e histórico em disco |
 | `internal/live/report` | Report Engine: análise por fase e por rota, base de cada número, comparação |
-| `internal/graph` | Repository Graph: `model` (schema v1), `analyzer` (Code Flow + go/types → nós e arestas), `builder` (merge, graus, Louvain), `layout`, `export` (JSON e HTML com Sigma.js) |
+| `internal/graph` | Repository Graph: `model` (schema v1, catálogo HTTP), `analyzer` (Code Flow + go/types → nós e arestas), `httpapi` (contratos HTTP, exemplos, cURL, grafo de execução de rotas), `builder` (merge, graus, Louvain, camadas), `layout`, `export` (JSON, HTML com Sigma.js, OpenAPI 3.1, Postman v2.1) |
 | `internal/study` | Study Mode: modelo determinístico (arquitetura, ordem de leitura, jornadas, decisões, testes, SQL, desempenho, exercícios) a partir das análises existentes |
 | `internal/pbwire` | Decodificador do formato protobuf (pprof, OTLP) |
 | `collector/`, `collector/pgxtracer` | Módulos opcionais (só biblioteca padrão / pgx) para instrumentar a aplicação |

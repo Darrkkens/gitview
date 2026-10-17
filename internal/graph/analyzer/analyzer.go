@@ -48,6 +48,9 @@ type Result struct {
 	Modules  []string
 	Versions []string
 	Limits   []string
+	// Flow holds the Code Flow index of each program, for analyses that
+	// work on it (layer classification).
+	Flow []*flow.Graph
 }
 
 type analysis struct {
@@ -484,6 +487,7 @@ func (a *analysis) funcNode(p *flow.Program, fn *ssa.Function) *model.Node {
 // external and unresolved targets) into graph nodes and edges.
 func (a *analysis) index(p *flow.Program) {
 	g := p.Index(flow.Options{External: true, MaxNodes: 1 << 30})
+	a.res.Flow = append(a.res.Flow, g)
 	if g.Truncated {
 		a.res.Limits = append(a.res.Limits, p.Module+": the call index hit its size limit")
 	}

@@ -109,7 +109,7 @@ func (m *model) graphStart() tea.Cmd {
 			}
 			progs = append(progs, p)
 		}
-		g, err := buildRepoGraph(ctx, root, progs, failures, time.Since(start))
+		g, err := buildRepoGraph(ctx, root, progs, failures, time.Since(start), false)
 		return graphDoneMsg{g: g, err: err}
 	}
 }

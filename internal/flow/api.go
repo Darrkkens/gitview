@@ -454,29 +454,52 @@ func DisplayPath(path string) string {
 
 // RouteInfo is an HTTP route registration found in the code.
 type RouteInfo struct {
+	ID      string // Code Flow node ID of the route (also the Repository Graph ID)
 	Router  string // gin | echo | chi | net/http
 	Method  string // "" when any method; "?" when computed at runtime
 	Path    string // pattern as registered, group prefixes included
 	File    string
 	Line    int
 	Partial bool
+	Notes   []string // what could not be resolved statically
 	// Handler is the final handler; Middleware runs before it, in order.
 	Handler     *ssa.Function
 	HandlerConf string
 	Middleware  []*ssa.Function
+	// Chain is every handler in execution order, middleware first, with
+	// where each joined the chain. Fn is nil when it could not be resolved.
+	Chain []ChainHandler
+}
+
+// ChainHandler is one element of a route's handler chain.
+type ChainHandler struct {
+	Fn         *ssa.Function
+	Conf       string
+	Note       string
+	Middleware bool
+	Scope      string // global | group | router | route
+	File       string // the Use, Group or registration call that added it
+	Line       int
+}
+
+// RouteID is the node ID of a route registration.
+func RouteID(method, path, file string, line int) string {
+	return fmt.Sprintf("route:%s %s@%s:%d", method, path, file, line)
 }
 
 // Routes returns the HTTP routes registered in the program.
 func (p *Program) Routes() []RouteInfo {
 	out := make([]RouteInfo, 0, len(p.routes))
 	for _, r := range p.routes {
-		ri := RouteInfo{Router: r.router, Method: r.method, Path: r.path, File: r.file, Line: r.line, Partial: r.partial}
+		ri := RouteInfo{ID: RouteID(r.method, r.path, r.file, r.line), Router: r.router, Method: r.method, Path: r.path,
+			File: r.file, Line: r.line, Partial: r.partial, Notes: r.notes}
 		for _, h := range r.handlers {
 			if h.middleware {
 				ri.Middleware = append(ri.Middleware, h.fn)
 			} else {
 				ri.Handler, ri.HandlerConf = h.fn, h.conf
 			}
+			ri.Chain = append(ri.Chain, ChainHandler{Fn: h.fn, Conf: h.conf, Note: h.note, Middleware: h.middleware, Scope: h.scope, File: h.file, Line: h.line})
 		}
 		out = append(out, ri)
 	}

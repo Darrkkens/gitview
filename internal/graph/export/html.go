@@ -11,6 +11,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/athos/gitview/internal/evidence"
 	"github.com/athos/gitview/internal/graph/model"
 )
 
@@ -166,7 +167,84 @@ func compact(g *model.Graph, opt HTMLOptions) map[string]any {
 		"initial": map[string]any{"level": opt.Level, "maxNodes": opt.MaxNodes, "maxEdges": opt.MaxEdges},
 		"kinds":   kinds.list, "etypes": etypes.list, "confs": confs.list, "esrc": esrc.list,
 		"communities": comms, "nodes": nodes, "edges": edges,
+		"http": slimHTTP(g.HTTP),
 	}
+}
+
+// maxEvidence bounds the evidence the page embeds per element; the JSON
+// export keeps all of it, with symbol IDs and evidence kinds.
+const maxEvidence = 3
+
+// pageEvidence is the part of an evidence entry the page shows.
+type pageEvidence struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Details string `json:"details,omitempty"`
+}
+
+func slimEvidence(list []evidence.Evidence) []pageEvidence {
+	out := make([]pageEvidence, 0, min(len(list), maxEvidence))
+	for i, e := range list {
+		if i == maxEvidence {
+			break
+		}
+		out = append(out, pageEvidence{e.File, e.Line, e.Details})
+	}
+	return out
+}
+
+// slimHTTP copies the HTTP catalog with at most maxEvidence evidence
+// entries per parameter, body and response (the total is kept), so large
+// APIs stay quick to open.
+func slimHTTP(h *model.HTTP) any {
+	if h == nil {
+		return nil
+	}
+	type param struct {
+		model.Param
+		Evidence []pageEvidence `json:"evidence"`
+	}
+	type body struct {
+		*model.Body
+		Evidence []pageEvidence `json:"evidence"`
+	}
+	type response struct {
+		model.Response
+		Evidence      []pageEvidence `json:"evidence"`
+		EvidenceTotal int            `json:"evidenceTotal"`
+	}
+	type auth struct {
+		*model.Auth
+		Evidence []pageEvidence `json:"evidence"`
+	}
+	type route struct {
+		*model.Route
+		Params    []param    `json:"params,omitempty"`
+		Body      *body      `json:"body,omitempty"`
+		Responses []response `json:"responses,omitempty"`
+		Auth      *auth      `json:"auth,omitempty"`
+	}
+	out := struct {
+		*model.HTTP
+		Routes []route `json:"routes"`
+	}{HTTP: h}
+	for _, r := range h.Routes {
+		x := route{Route: r}
+		for _, p := range r.Params {
+			x.Params = append(x.Params, param{p, slimEvidence(p.Evidence)})
+		}
+		if r.Body != nil {
+			x.Body = &body{r.Body, slimEvidence(r.Body.Evidence)}
+		}
+		for _, resp := range r.Responses {
+			x.Responses = append(x.Responses, response{resp, slimEvidence(resp.Evidence), len(resp.Evidence)})
+		}
+		if r.Auth != nil {
+			x.Auth = &auth{r.Auth, slimEvidence(r.Auth.Evidence)}
+		}
+		out.Routes = append(out.Routes, x)
+	}
+	return out
 }
 
 var pageTmpl = template.Must(template.New("graph").Parse(`<!doctype html>
@@ -187,6 +265,7 @@ var pageTmpl = template.Must(template.New("graph").Parse(`<!doctype html>
   <div class="tools" id="tools"></div>
 </header>
 <main id="app">
+  <aside id="routes" aria-label="HTTP routes" hidden></aside>
   <section id="stage" aria-label="Graph">
     <div id="graph"></div>
     <div id="msg" class="msg" role="status"></div>

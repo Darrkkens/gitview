@@ -29,6 +29,8 @@ type Options struct {
 	Now      func() time.Time
 	// Analysis is how long loading the programs took, for the statistics.
 	Analysis time.Duration
+	// NoHTTP leaves the HTTP catalog (routes and contracts) out.
+	NoHTTP bool
 }
 
 // Method documents how the dataset was computed; it is written into every
@@ -42,6 +44,9 @@ var Method = []string{
 	"Several call sites between the same functions are merged into one edge; weight is the number of sites and confidence the strongest one.",
 	"Communities: Louvain modularity (resolution 1), deterministic order (node ID), ties keep the current community. Package communities use imports plus cross-package symbol relations; symbol communities use calls, type relations and closures. Communities are structural groups, not architectural layers.",
 	"Layout: deterministic Fruchterman–Reingold for packages, then each package's members in a disc around it. Positions depend only on the graph.",
+	"Layers (metadata.layer): Study Mode's architecture classification. STATIC when the code's structure shows the role (registered as a route handler, executes a database operation, sits between them in the call graph), HEURISTIC when only the directory name suggests it.",
+	"HTTP contracts: the handler chain of each route is interpreted from its SSA: framework calls (gin, net/http, chi, echo, encoding/json) give parameters, bodies and responses; statuses and body types are resolved through parameters, struct fields, package variables and returned values of the helpers that receive HTTP values. Services are not entered. What cannot be resolved is marked partial or unknown.",
+	"Examples: synthetic values chosen from the declared types and recognised validation rules; never data read from the application.",
 }
 
 var confRank = map[string]int{model.Confirmed: 4, model.Likely: 3, model.Possible: 2, model.Unresolved: 1}
@@ -91,6 +96,13 @@ func Build(ctx context.Context, progs []*flow.Program, opt Options) (*model.Grap
 	g.Edges = mergeEdges(res, opt.MaxSites)
 	g.Sort()
 	degrees(g)
+	roles(g, progs, res.Flow)
+	if !opt.NoHTTP {
+		g.HTTP = httpCatalog(g, progs)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	g.Stats.BuildMS = time.Since(t0).Milliseconds()
 
 	t1 := time.Now()
@@ -401,6 +413,9 @@ func stats(g *model.Graph) {
 		}
 	}
 	s.Nodes, s.Edges = len(g.Nodes), len(g.Edges)
+	if g.HTTP != nil {
+		s.Routes = len(g.HTTP.Routes)
+	}
 	s.Communities = len(g.Communities)
 }
 

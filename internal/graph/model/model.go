@@ -143,6 +143,7 @@ type Stats struct {
 	Nodes            int            `json:"nodes"`
 	Edges            int            `json:"edges"`
 	Communities      int            `json:"communities"`
+	Routes           int            `json:"routes"`
 	Modularity       float64        `json:"modularity"`
 	NodesByType      map[string]int `json:"nodesByType"`
 	EdgesByType      map[string]int `json:"edgesByType"`
@@ -163,7 +164,10 @@ type Graph struct {
 	Nodes       []*Node     `json:"nodes"`
 	Edges       []*Edge     `json:"edges"`
 	Communities []Community `json:"communities"`
-	Stats       Stats       `json:"stats"`
+	// HTTP is the HTTP catalog (routes and contracts); nil when the
+	// analysis found no route or it was not requested.
+	HTTP  *HTTP `json:"http,omitempty"`
+	Stats Stats `json:"stats"`
 	// Completeness lists what limited the analysis (load errors, packages
 	// that did not type-check, unresolved calls).
 	Completeness evidence.Completeness `json:"completeness"`
