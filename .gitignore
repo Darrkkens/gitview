@@ -1,0 +1,5 @@
+gitview
+*.test
+*.out
+.env
+.env.*
