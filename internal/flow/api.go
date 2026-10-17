@@ -515,3 +515,15 @@ func (p *Program) Packages() []PackageInfo {
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
+
+// TypedPackages returns the type-checked syntax of every module package,
+// sorted by import path, for analyses that need declarations other than
+// functions (types, imports, embedding). The packages must not be modified.
+func (p *Program) TypedPackages() []*packages.Package {
+	out := make([]*packages.Package, 0, len(p.pkgs))
+	for _, pk := range p.pkgs {
+		out = append(out, pk)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PkgPath < out[j].PkgPath })
+	return out
+}

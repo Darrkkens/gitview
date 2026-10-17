@@ -27,6 +27,7 @@ const (
 	screenTests
 	screenFlow
 	screenRuntime
+	screenGraph
 )
 
 type (
@@ -98,6 +99,7 @@ type model struct {
 	flow        *flowUI
 	insp        *inspUI
 	rt          *runtimeUI
+	graph       *graphUI
 	parseCache  *parseCache
 	renderCache map[string]renderEntry
 	delta       *deltaRenderer
@@ -125,6 +127,7 @@ func newModel(repo *Repo, events <-chan struct{}, opt options) *model {
 		flow:        newFlowUI(),
 		insp:        newInspUI(),
 		rt:          newRuntimeUI(),
+		graph:       newGraphUI(),
 		renderCache: map[string]renderEntry{},
 		delta:       newDeltaRenderer(),
 		hasDelta:    hasDelta,
@@ -275,6 +278,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.inspRefresh(true)
 		}
 
+	case graphDoneMsg:
+		m.graphDone(msg)
+
+	case graphWrittenMsg:
+		m.graphWritten(msg)
+
+	case graphOpenedMsg:
+		if msg.err != nil {
+			m.graph.msg, m.graph.msgErr = "não foi possível abrir o navegador: "+msg.err.Error(), true
+		}
+
 	case inspDocMsg:
 		m.inspDocDone(msg)
 
@@ -303,6 +317,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tests.runner.Cancel()
 			m.inspStop()
 			m.rtStopAll()
+			m.graphStop()
 			return m, tea.Quit
 		}
 		if m.showHelp {
@@ -322,6 +337,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.flowKey(msg)
 		case screenRuntime:
 			return m, m.runtimeKey(msg)
+		case screenGraph:
+			return m, m.graphKey(msg)
 		}
 		return m, m.handleKey(msg)
 	}
@@ -381,6 +398,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.tests.runner.Cancel()
 		m.inspStop()
 		m.rtStopAll()
+		m.graphStop()
 		return tea.Quit
 	case "?":
 		m.showHelp = true
@@ -445,6 +463,8 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.openInspect()
 	case "m":
 		return m.openRuntime()
+	case "a":
+		return m.openGraph()
 	case "r":
 		return m.requestRefresh()
 	}
@@ -614,6 +634,8 @@ func (m *model) View() string {
 		body = m.flowView()
 	case m.screen == screenRuntime:
 		body = m.runtimeView()
+	case m.screen == screenGraph:
+		body = m.graphView()
 	default:
 		body = m.vp.View()
 	}
@@ -657,6 +679,8 @@ func (m *model) footerView() string {
 		return m.flowFooter()
 	case screenRuntime:
 		return m.runtimeFooter()
+	case screenGraph:
+		return m.graphFooter()
 	}
 	if m.err != nil {
 		return " " + stDel.Render(ansiTruncate(m.err.Error(), m.width-2))
@@ -677,6 +701,7 @@ func (m *model) footerView() string {
 		keyHint{"f", "Flow"},
 		keyHint{"i", "Inspector"},
 		keyHint{"m", "Runtime"},
+		keyHint{"a", "Grafo"},
 		keyHint{"x", "Exportar"},
 	)
 	if m.hoff > 0 {

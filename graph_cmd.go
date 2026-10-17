@@ -1,0 +1,300 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/athos/gitview/internal/export"
+	"github.com/athos/gitview/internal/flow"
+	"github.com/athos/gitview/internal/graph/builder"
+	gexport "github.com/athos/gitview/internal/graph/export"
+	gmodel "github.com/athos/gitview/internal/graph/model"
+)
+
+const graphUsage = `uso: gitview graph <subcomando> [opções] [diretório]
+
+Repository Graph: o repositório Go inteiro como um grafo navegável (pacotes,
+arquivos, tipos, funções, chamadas, imports, implementações, rotas e SQL),
+obtido por análise estática com go/packages, go/types e SSA. Nada é
+executado e nenhuma relação é deduzida por nome.
+
+subcomandos:
+  export   grava o grafo em HTML interativo (padrão) ou JSON
+  stats    imprime as estatísticas da análise
+
+exemplos:
+  gitview graph export                          # gitview-graph.html
+  gitview graph export --output architecture.html
+  gitview graph export --format json --output graph.json
+  gitview graph export --format json --level packages
+  gitview graph export --level functions        # visão inicial do HTML
+  gitview graph stats --module backend
+
+níveis (--level): full, packages, files, functions, types.
+No HTML o nível é só a visão inicial: o arquivo contém o grafo completo.
+No JSON o nível filtra o dataset (files acrescenta arestas derivadas entre
+arquivos, marcadas como "derived").
+`
+
+type graphFlags struct {
+	format    string
+	output    string
+	level     string
+	module    string
+	maxNodes  int
+	maxEdges  int
+	overwrite bool
+	jsonOut   bool
+}
+
+func runGraph(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprint(stderr, graphUsage)
+		if len(args) == 0 {
+			return 2
+		}
+		return 0
+	}
+	sub, args := args[0], args[1:]
+	if sub != "export" && sub != "stats" {
+		fmt.Fprintf(stderr, "gitview graph: subcomando desconhecido %q\n\n%s", sub, graphUsage)
+		return 2
+	}
+	fs := flag.NewFlagSet("graph "+sub, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var f graphFlags
+	fs.StringVar(&f.module, "module", "", "analisa só o módulo Go deste diretório (padrão: todos os módulos do repositório)")
+	if sub == "export" {
+		fs.StringVar(&f.format, "format", "html", "html ou json")
+		fs.StringVar(&f.output, "output", "", "arquivo de saída (padrão gitview-graph.html; JSON sem --output vai para a saída padrão)")
+		fs.StringVar(&f.output, "o", "", "atalho para --output")
+		fs.StringVar(&f.level, "level", "", "full, packages, files, functions ou types")
+		fs.IntVar(&f.maxNodes, "max-nodes", 5000, "HTML: nós desenhados de uma vez antes de manter só os mais conectados")
+		fs.IntVar(&f.maxEdges, "max-edges", 25000, "HTML: arestas desenhadas de uma vez")
+		fs.BoolVar(&f.overwrite, "overwrite", false, "substitui o arquivo de saída se existir")
+	} else {
+		fs.BoolVar(&f.jsonOut, "json", false, "imprime as estatísticas em JSON")
+	}
+	fs.Usage = func() { fmt.Fprint(stderr, graphUsage+"\nopções:\n"); fs.PrintDefaults() }
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if f.format != "" && f.format != "html" && f.format != "json" {
+		fmt.Fprintln(stderr, "gitview graph export: --format deve ser html ou json")
+		return 2
+	}
+	if f.level != "" && !gexport.ValidLevel(f.level) {
+		fmt.Fprintln(stderr, "gitview graph export: --level deve ser um de", strings.Join(gexport.Levels, ", "))
+		return 2
+	}
+	dir := "."
+	if fs.NArg() > 0 {
+		dir = fs.Arg(0)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	g, err := analyzeRepoGraph(ctx, dir, f.module, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "gitview graph:", err)
+		if errors.Is(err, context.Canceled) {
+			return 130
+		}
+		return 1
+	}
+	if sub == "stats" {
+		if f.jsonOut {
+			return writeOrFail(stdout, stderr, func(w io.Writer) error { return gexport.JSON(w, &gmodel.Graph{Schema: g.Schema, Stats: g.Stats}, "") })
+		}
+		printGraphStats(stdout, g)
+		return 0
+	}
+	printGraphStats(stderr, g)
+
+	var buf bytes.Buffer
+	if f.format == "json" {
+		err = gexport.JSON(&buf, g, f.level)
+	} else {
+		err = gexport.HTML(&buf, g, gexport.HTMLOptions{Level: f.level, MaxNodes: f.maxNodes, MaxEdges: f.maxEdges})
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "gitview graph export:", err)
+		return 1
+	}
+	out := f.output
+	if out == "" && f.format == "json" {
+		_, err := stdout.Write(buf.Bytes())
+		if err != nil {
+			return 1
+		}
+		return 0
+	}
+	if out == "" {
+		out = "gitview-graph.html"
+	}
+	if err := export.WriteFile(out, buf.Bytes(), f.overwrite); err != nil {
+		if errors.Is(err, export.ErrExists) {
+			fmt.Fprintln(stderr, "gitview graph export:", out, "já existe; use --overwrite")
+			return 1
+		}
+		fmt.Fprintln(stderr, "gitview graph export:", err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "grafo gravado em %s (%s)\n", out, byteSize(buf.Len()))
+	return 0
+}
+
+func writeOrFail(w, stderr io.Writer, fn func(io.Writer) error) int {
+	if err := fn(w); err != nil {
+		fmt.Fprintln(stderr, "gitview graph:", err)
+		return 1
+	}
+	return 0
+}
+
+// graphModules returns the repository root and the module directories to
+// analyse: every module of the repository, or only the one containing
+// module when it is given.
+func graphModules(dir, module string) (string, []string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	root := abs
+	if repo, err := OpenRepo(abs); err == nil {
+		root = repo.Root
+	}
+	if module != "" {
+		m, err := filepath.Abs(module)
+		if err != nil {
+			return "", nil, err
+		}
+		mod := flow.EnclosingModule(m, root)
+		if mod == "" {
+			return "", nil, fmt.Errorf("nenhum go.mod em %s", module)
+		}
+		return root, []string{mod}, nil
+	}
+	mods := flow.FindModules(root)
+	if len(mods) == 0 {
+		if m := flow.EnclosingModule(abs, root); m != "" {
+			mods = []string{m}
+		}
+	}
+	if len(mods) == 0 {
+		return "", nil, fmt.Errorf("nenhum módulo Go (go.mod) em %s", root)
+	}
+	return root, mods, nil
+}
+
+// analyzeRepoGraph loads the modules (printing progress) and builds the
+// dataset.
+func analyzeRepoGraph(ctx context.Context, dir, module string, progress io.Writer) (*gmodel.Graph, error) {
+	root, mods, err := graphModules(dir, module)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	var progs []*flow.Program
+	var failures []string
+	for _, m := range mods {
+		rel, _ := filepath.Rel(root, m)
+		fmt.Fprintf(progress, "analisando %s…", rel)
+		t := time.Now()
+		p, err := flow.Load(ctx, root, m)
+		if ctx.Err() != nil {
+			fmt.Fprintln(progress)
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			fmt.Fprintln(progress, " falhou:", err)
+			failures = append(failures, rel+": "+err.Error())
+			continue
+		}
+		fmt.Fprintf(progress, " %s\n", time.Since(t).Round(10*time.Millisecond))
+		progs = append(progs, p)
+	}
+	return buildRepoGraph(ctx, root, progs, failures, time.Since(start))
+}
+
+func buildRepoGraph(ctx context.Context, root string, progs []*flow.Program, failures []string, analysis time.Duration) (*gmodel.Graph, error) {
+	if len(progs) == 0 {
+		if len(failures) > 0 {
+			return nil, errors.New(failures[0])
+		}
+		return nil, errors.New("nenhum pacote Go analisado")
+	}
+	g, err := builder.Build(ctx, progs, builder.Options{Repository: filepath.Base(root), Root: root, Analysis: analysis})
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range failures {
+		g.Completeness.Limit("módulo não analisado: " + f)
+	}
+	if err := g.Validate(); err != nil {
+		return nil, fmt.Errorf("dataset inconsistente (erro interno): %w", err)
+	}
+	return g, nil
+}
+
+// graphStatsLines renders the build metrics, shared by the CLI and the TUI.
+func graphStatsLines(g *gmodel.Graph) [][2]string {
+	s := g.Stats
+	return [][2]string{
+		{"Modules analyzed", fmt.Sprint(s.Modules)},
+		{"Packages analyzed", groupDigits(s.Packages)},
+		{"External packages", groupDigits(s.ExternalPackages)},
+		{"Files analyzed", groupDigits(s.Files)},
+		{"Functions discovered", groupDigits(s.Functions)},
+		{"Types discovered", groupDigits(s.Types)},
+		{"Nodes generated", groupDigits(s.Nodes)},
+		{"Edges generated", groupDigits(s.Edges)},
+		{"Communities detected", groupDigits(s.Communities)},
+		{"Package modularity", fmt.Sprintf("%.3f", s.Modularity)},
+		{"Calls by confidence", fmt.Sprintf("%d confirmed, %d likely, %d possible, %d unresolved",
+			s.EdgesByConf[gmodel.Confirmed], s.EdgesByConf[gmodel.Likely], s.EdgesByConf[gmodel.Possible], s.EdgesByConf[gmodel.Unresolved])},
+		{"Analysis duration", (time.Duration(s.AnalysisMS) * time.Millisecond).String()},
+		{"Graph build", (time.Duration(s.BuildMS) * time.Millisecond).String()},
+		{"Communities + layout", (time.Duration(s.LayoutMS) * time.Millisecond).String()},
+	}
+}
+
+func printGraphStats(w io.Writer, g *gmodel.Graph) {
+	for _, l := range graphStatsLines(g) {
+		fmt.Fprintf(w, "%-22s %s\n", l[0]+":", l[1])
+	}
+	if g.Completeness.Status != "complete" {
+		fmt.Fprintf(w, "%-22s %s\n", "Completeness:", g.Completeness.String())
+	}
+}
+
+func groupDigits(n int) string {
+	s := fmt.Sprint(n)
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+func byteSize(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}

@@ -22,6 +22,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "study" {
 		os.Exit(runStudy(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "graph" {
+		os.Exit(runGraph(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "runtime" {
 		os.Exit(runRuntime(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -33,7 +36,7 @@ func main() {
 	testTimeout := flag.Duration("test-timeout", 0, "tempo limite de uma execução de testes (padrão 10m)")
 	ascii := flag.Bool("ascii", os.Getenv("GITVIEW_ASCII") != "", "usa símbolos ASCII em vez de Unicode")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "uso: gitview [opções] [diretório]\n       gitview flow [opções] [diretório]      (veja gitview flow -h)\n       gitview inspect [subcomando] [opções]  (veja gitview inspect help)\n       gitview runtime <subcomando> [opções]  (veja gitview runtime help)\n       gitview study [-o study.html] [opções]  (relatório com a aba Study)\n\n")
+		fmt.Fprintf(os.Stderr, "uso: gitview [opções] [diretório]\n       gitview flow [opções] [diretório]      (veja gitview flow -h)\n       gitview inspect [subcomando] [opções]  (veja gitview inspect help)\n       gitview runtime <subcomando> [opções]  (veja gitview runtime help)\n       gitview study [-o study.html] [opções]  (relatório com a aba Study)\n       gitview graph export [opções]          (Repository Graph; veja gitview graph help)\n\n")
 		flag.PrintDefaults()
 		fmt.Fprint(os.Stderr, `
 atalhos principais:

@@ -37,6 +37,7 @@ Mouse: a roda rola o diff; clicar numa dica do rodapé (por exemplo `x Exportar`
 | `f` | Code Flow: chamadores e chamadas de uma função Go |
 | `i` | Go Deep Inspector: Data Flow, Execution Trace, Branch Explorer, Performance e SQL Explorer da mesma função |
 | `m` | Runtime Performance: mede um processo Go em execução pelo PID |
+| `a` | Repository Graph: o repositório inteiro como grafo navegável (exporta HTML) |
 | `x` | Exportar relatório |
 | d | Alternar renderização Delta/nativa |
 | r | Atualizar agora (no painel de testes: reexecutar) |
@@ -410,6 +411,98 @@ Limites:
 - Índices são lidos dos `.sql` sem considerar a ordem das migrações nem o banco real.
 - Desafios de ramo só usam condições com operandos inteiros ou booleanos (tipos verificados pelo type checker) e os operadores `> < >= <= == != && || !`.
 
+## Repository Graph (`a`, `gitview graph`)
+
+Transforma o repositório Go inteiro em um grafo de conhecimento estrutural, navegável num HTML offline: módulos, pacotes, arquivos, structs, interfaces, funções, métodos, closures, rotas HTTP e operações SQL, ligados pelas relações encontradas no código. Nenhuma relação é deduzida pelo nome de uma função ou arquivo, nada do repositório é executado, e nenhum arquivo dele é modificado.
+
+```sh
+gitview graph export                                # gitview-graph.html, todos os módulos do repositório
+gitview graph export --output architecture.html
+gitview graph export --format json --output graph.json
+gitview graph export --format json --level packages # dataset filtrado
+gitview graph export --level functions              # visão inicial do HTML
+gitview graph export --module backend               # só um módulo
+gitview graph stats                                 # métricas (também --json)
+```
+
+O arquivo nunca é sobrescrito sem `--overwrite`. Na TUI, `a` abre o painel de controle: escolha o escopo (repositório inteiro ou um módulo), `Enter` analisa em segundo plano (cancelável com `Esc`, sem bloquear o monitoramento do Git), `x` exporta o HTML e `J` o JSON (arquivos novos com data e hora, no diretório de exportação), e `o` abre o último HTML no navegador. Milhares de nós não são desenhados no terminal: a TUI controla, o HTML visualiza.
+
+### De onde vem cada relação
+
+O grafo é uma camada de transformação sobre os analisadores existentes (**Code Flow → Repository Graph Builder → dataset → visualização**). Não há um segundo motor de análise: o grafo reaproveita a análise do Code Flow, e o cache dela, que só recarrega um módulo quando os seus `.go`, `go.mod` ou `go.sum` mudam.
+
+| Relação | Origem | Confiança |
+|---|---|---|
+| `contains` (módulo → pacote → arquivo → declaração, função → closure) | go/packages, go/types, SSA | confirmed |
+| `imports` | declarações `import` (evidência: arquivo:linha; peso: arquivos que importam) | confirmed |
+| `calls`, `go`, `defer` | índice do Code Flow (SSA) | confirmed, likely, possible ou unresolved, como no Code Flow |
+| `handles` (rota → handler/middleware), `queries` (função → operação SQL) | reconhecedores do Code Flow (net/http, gin, chi, echo; pgx, database/sql, sqlx) | idem |
+| `implements` | `types.Implements` para cada tipo concreto e cada interface não vazia do mesmo módulo (method set do valor ou do ponteiro) | confirmed |
+| `embeds`, `references` (campos e assinaturas que usam tipos do módulo), `method` | declarações go/types | confirmed |
+
+- Toda aresta traz evidência (`go/ssa`, `go/types` ou `go/packages`, com arquivo e linha).
+- Várias chamadas entre as mesmas funções viram uma aresta com `weight` e a lista de locais.
+- Uma chamada sem destino determinável aponta para um nó `unresolved` explícito, nunca para um destino inventado. A completude da análise (`complete`/`partial` e os motivos) faz parte do dataset.
+
+### Dataset (`gitview.graph/v1`)
+
+- **IDs estáveis** derivados só do símbolo:
+  - `package:<import path>`, `file:<caminho>`, `type:<pkg>.<Nome>` e `func:<nome SSA>`. Por exemplo, `func:(*example.com/app/users.Service).GetUser`. Go não tem sobrecarga, então pacote, receiver e nome identificam a função, e as closures levam o sufixo `.func1`.
+  - Rotas, SQL, funções externas e chamadas não resolvidas mantêm os IDs do Code Flow.
+  - Duas execuções sobre o mesmo código produzem o mesmo arquivo, exceto pelos tempos e pela data.
+- Cada nó traz: tipo, pacote, arquivo:linha, assinatura, comunidade, grau (de entrada e de saída), posição, `metadata`, e `annotations`, reservado para análises futuras (findings de auditoria, por exemplo).
+- `--level` filtra o JSON:
+  - `packages`: pacotes e imports;
+  - `files`: arquivos, com arestas `depends` **derivadas** das relações entre as declarações, marcadas `derived`;
+  - `functions`: funções e chamadas;
+  - `types`: tipos e suas relações;
+  - `full`: tudo (padrão).
+
+### Comunidades e layout
+
+- **Comunidades** são detectadas com o algoritmo de Louvain (modularidade, resolução 1), de forma determinística:
+  - os nós são visitados em ordem de ID, e um nó só muda de comunidade quando o ganho é estritamente maior; os empates mantêm a comunidade atual e depois favorecem o menor índice;
+  - roda em dois níveis: pacotes (imports mais relações entre símbolos de pacotes diferentes) e símbolos (chamadas, relações de tipo e closures);
+  - o rótulo de cada comunidade é o nome do membro mais conectado. São grupos estruturais, não camadas arquiteturais.
+- **Layout** calculado no Go, também determinístico:
+  - Fruchterman–Reingold para os pacotes;
+  - os membros de cada pacote ficam num disco em volta dele;
+  - assim, um símbolo ocupa o mesmo lugar no Overview e no Module Explorer.
+
+### O HTML
+
+Um único arquivo, que funciona por `file://`, sem servidor, CDN ou requisições de rede.
+
+- **Renderização**: Sigma.js 3.0.2 com Graphology 0.26.0 (WebGL, MIT), embutidos em `internal/graph/export/assets` com as licenças e o hash dos arquivos originais.
+- **Segurança**: a Content-Security-Policy (`default-src 'none'`) permite só os três scripts da página, fixados por SHA-256. Os dados ficam num bloco JSON inerte, e o texto do repositório entra na página com `textContent`.
+
+Três escalas sobre o mesmo dataset, sem nova análise ao trocar de escala:
+
+1. **Repository Overview**: pacotes e imports agrupados por comunidade. O seletor de nível alterna para File, Function, Type ou Full Repository Graph.
+2. **Module Explorer** (duplo clique num pacote): os arquivos, tipos e funções do pacote, nas mesmas posições do Overview. Os pacotes conectados ficam num anel externo, com as relações agregadas por símbolo. Escolher um arquivo restringe a visão às declarações dele.
+3. **Symbol Explorer** (duplo clique numa função ou tipo): chamadores à esquerda e chamados à direita, por profundidade (0 a 6 em cada direção), com setas e confiança. Para tipos, mostra implementações, embeds, referências e métodos.
+
+Interações:
+
+- **Navegação**: breadcrumbs Repository › pacote › arquivo › símbolo, e `Backspace` sobe um nível.
+- **Busca** (`/`) por função, método, tipo, pacote ou arquivo, que abre o nó na escala certa e dá zoom nele.
+- **Seleção**: painel com tipo, pacote, arquivo:linha, assinatura, comunidade, conexões, chamadores e chamados (com confiança e local da chamada) e dependências.
+- **Foco**: só o nó selecionado e seus vizinhos, até a profundidade escolhida.
+- **Caminho entre dois nós**: "Path from here" e depois clicar no destino. Procura primeiro um caminho dirigido e, se não houver, ignora a direção, avisando no painel.
+- **Filtros** por tipo de nó e de relação, ocultar dependências externas, closures, rótulos e setas.
+- **Comunidades**: mostrar/ocultar e destacar com as conexões externas.
+- **Estrutura**: nós mais conectados, nós isolados e componentes conexos da visão.
+- **Deep links** (`#package=…`, `#symbol=…`, `#level=…`) que preservam a visão ao recarregar.
+
+Limites:
+
+- **Limites configuráveis** (`--max-nodes`, `--max-edges` e o menu Filters): acima deles, a visão mantém os nós mais conectados e as relações mais fortes, e avisa quantos ficaram de fora. O dataset embutido continua completo.
+- **Análise estática**: uma aresta é uma relação que pode acontecer, não uma execução observada.
+  - `implements` só considera interfaces do mesmo módulo, já que cada módulo é verificado separadamente.
+  - Referências a tipos cobrem campos e assinaturas, não o corpo das funções.
+- **Tamanho**: repositórios com dezenas de milhares de arestas geram arquivos de alguns MB (o pgx, com 40 mil linhas, gera 5,4 MB).
+- **WebGL**: sem ele, a página avisa, e a busca, as listas e os detalhes continuam funcionando.
+
 ## Configuração (`.gitview.json` na raiz do repositório)
 
 ```json
@@ -455,7 +548,8 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/live/srcmap` | Source Mapper: quadros, rotas e chamadas SQL → símbolos do Code Flow e operações do SQL Explorer |
 | `internal/live/capture` | Sessões de captura (fases, pausa, limites) e histórico em disco |
 | `internal/live/report` | Report Engine: análise por fase e por rota, base de cada número, comparação |
+| `internal/graph` | Repository Graph: `model` (schema v1), `analyzer` (Code Flow + go/types → nós e arestas), `builder` (merge, graus, Louvain), `layout`, `export` (JSON e HTML com Sigma.js) |
 | `internal/study` | Study Mode: modelo determinístico (arquitetura, ordem de leitura, jornadas, decisões, testes, SQL, desempenho, exercícios) a partir das análises existentes |
 | `internal/pbwire` | Decodificador do formato protobuf (pprof, OTLP) |
 | `collector/`, `collector/pgxtracer` | Módulos opcionais (só biblioteca padrão / pgx) para instrumentar a aplicação |
-| raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance; CLI `flow`, `inspect` e `runtime` |
+| raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance e Repository Graph; CLI `flow`, `inspect`, `runtime` e `graph` |
