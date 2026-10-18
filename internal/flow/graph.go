@@ -335,7 +335,7 @@ func (b *builder) routesTo(fn *ssa.Function) {
 }
 
 func (b *builder) addRoute(r *route) {
-	id := fmt.Sprintf("route:%s %s@%s:%d", r.method, r.path, r.file, r.line)
+	id := RouteID(r.method, r.path, r.file, r.line)
 	if _, ok := b.nodes[id]; ok {
 		return
 	}

@@ -92,6 +92,13 @@ func (t *tracer) preds(it item) []step {
 	case *ssa.Lookup:
 		return []step{{v: x.X, kind: EdgeDerived, conf: evidence.Derived, label: "map lookup", pos: x.Pos(), fromCtx: true}}
 	case *ssa.Slice:
+		if ptr, ok := x.X.Type().Underlying().(*types.Pointer); ok {
+			if _, isArray := ptr.Elem().Underlying().(*types.Array); isArray {
+				// A slice of an array (variadic arguments, s[:] of a local
+				// array): its elements are what was written to the array.
+				return []step{{v: x.X, mem: true, kind: EdgeDerived, conf: evidence.Derived, label: "slice", pos: x.Pos(), fromCtx: true}}
+			}
+		}
 		return []step{{v: x.X, kind: EdgeDerived, conf: evidence.Derived, label: "slice", pos: x.Pos(), fromCtx: true}}
 	case *ssa.Next:
 		return []step{{v: x.Iter, kind: EdgeDerived, conf: evidence.Derived, label: "range element", fromCtx: true}}
@@ -1057,6 +1064,7 @@ func (t *tracer) memPreds(addr ssa.Value, load ssa.Value) []step {
 		at = load.Pos()
 	}
 	var stores []step
+	var writes []*ssa.Store
 	for _, fn := range fns {
 		for _, b := range fn.Blocks {
 			for _, ins := range b.Instrs {
@@ -1071,14 +1079,20 @@ func (t *tracer) memPreds(addr ssa.Value, load ssa.Value) []step {
 				if loadIns != nil && st.Parent() == loadIns.Parent() && (!t.reaches(st, loadIns) || killed(st, loadIns, l, alias)) {
 					continue
 				}
-				if esc || !local {
+				// The array of variadic arguments only exists for its call.
+				if (esc || !local) && !isVarargs(l.base) {
 					conf = weaker(conf, evidence.Possible)
 				}
-				stores = append(stores, step{v: st.Val, kind: EdgeStore, conf: conf, label: "written at line " + lineOf(t.p, st.Pos()), pos: st.Pos(), fromCtx: st.Parent() == addr.Parent()})
+				label := "written at line " + lineOf(t.p, st.Pos())
+				if !st.Pos().IsValid() {
+					label = "element"
+				}
+				stores = append(stores, step{v: st.Val, kind: EdgeStore, conf: conf, label: label, pos: st.Pos(), fromCtx: st.Parent() == addr.Parent()})
+				writes = append(writes, st)
 			}
 		}
 	}
-	if len(stores) > 1 {
+	if len(stores) > 1 && !distinctElements(writes) {
 		for i := range stores {
 			if stores[i].conf == evidence.Exact {
 				stores[i].conf = evidence.Possible // several writes may reach: some may be overwritten
@@ -1105,6 +1119,34 @@ func (t *tracer) memPreds(addr ssa.Value, load ssa.Value) []step {
 			kind: EdgeLoad, conf: evidence.Unresolved, stop: true})
 	}
 	return stores
+}
+
+// distinctElements reports whether the writes all go to different constant
+// indices of one array (variadic arguments, array literals): none can
+// overwrite another.
+func distinctElements(writes []*ssa.Store) bool {
+	seen := map[int64]bool{}
+	for _, st := range writes {
+		ia, ok := st.Addr.(*ssa.IndexAddr)
+		if !ok {
+			return false
+		}
+		k, ok := ia.Index.(*ssa.Const)
+		if !ok || k.Value == nil {
+			return false
+		}
+		i, exact := constant.Int64Val(k.Value)
+		if !exact || seen[i] {
+			return false
+		}
+		seen[i] = true
+	}
+	return true
+}
+
+func isVarargs(v ssa.Value) bool {
+	a, ok := v.(*ssa.Alloc)
+	return ok && a.Comment == "varargs"
 }
 
 // lastLine returns the last source line executed in a block.
@@ -1216,9 +1258,20 @@ func (t *tracer) writerStep(ci ssa.CallInstruction, addr ssa.Value) step {
 			n := t.event(KindSource, "HTTP JSON request body", "decoded by json.Decoder.Decode", ci.Parent(), ci.Pos(), "http-input")
 			return step{node: n, kind: EdgeSource, conf: evidence.Exact, pos: ci.Pos(), stop: true}
 		}
+	case bindMethods[method] && (recvPkg == "github.com/gin-gonic/gin" || recvPkg == "github.com/labstack/echo/v4"):
+		// gin and echo bind the request (body, query, URI or headers) into
+		// the value whose address they receive.
+		n := t.event(KindSource, "HTTP request bound by "+name, "decoded by the framework's binding", ci.Parent(), ci.Pos(), "http-input")
+		return step{node: n, kind: EdgeSource, conf: evidence.Exact, pos: ci.Pos(), stop: true}
 	}
 	n := t.event(KindUnresolved, "may be written by "+name, "the call receives the address; what it writes is not analysed", ci.Parent(), ci.Pos())
 	return step{node: n, kind: EdgeStore, conf: evidence.Possible, pos: ci.Pos(), stop: true}
+}
+
+var bindMethods = map[string]bool{
+	"Bind": true, "BindJSON": true, "BindQuery": true, "BindUri": true, "BindHeader": true, "BindWith": true,
+	"ShouldBind": true, "ShouldBindJSON": true, "ShouldBindQuery": true, "ShouldBindUri": true, "ShouldBindHeader": true,
+	"ShouldBindWith": true, "ShouldBindBodyWith": true, "MustBindWith": true,
 }
 
 func typePkg(t types.Type) string {

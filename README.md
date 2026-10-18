@@ -1,4 +1,63 @@
-# GitView
+<p align="center">
+  <img src="docs/assets/gitview-icon.svg" width="96" height="96" alt="GitView logo: three connected nodes">
+</p>
+
+<h1 align="center">GitView</h1>
+
+<p align="center">
+  Git em tempo real no terminal, mapa do repositório Go e <b>CodeAudit</b>: auditoria de segurança local com evidências verificáveis, explicada pelo Gemma no Ollama. O código não sai da máquina.
+</p>
+
+<p align="center">
+  <a href="#codeaudit-in-english-hacktoberfest-2026">CodeAudit (English)</a> ·
+  <a href="#codeaudit-security-journey-s-gitview-audit-modo-security-do-html">CodeAudit</a> ·
+  <a href="#repository-graph-a-gitview-graph">Repository Graph</a> ·
+  <a href="#code-flow-f-gitview-flow-aba-no-html">Code Flow</a> ·
+  <a href="#go-deep-inspector-i-gitview-inspect-aba-no-html">Go Deep Inspector</a>
+</p>
+
+## CodeAudit in English (Hacktoberfest 2026)
+
+**A security review of a Go backend that runs entirely on your laptop.**
+
+CodeAudit reuses GitView's static analysis (call graph, HTTP routes, data flow, SQL operations) to look for injection, authentication, authorization, data exposure, configuration and dependency problems. Each finding is shown as a path, route → middlewares → handler → the line that matters, with the evidence behind every step. When you ask, Gemma running on Ollama explains the finding from that evidence only. Every evidence ID, file, line and symbol the model cites is checked against the analysis, and citations that do not exist are shown as rejected.
+
+**Who it is for:** freelancers and small agencies that ship Go APIs to clients and have to hand over a security review they can defend; consultants auditing client code under NDA, where pasting code into a cloud API is not an option; small teams without an AppSec budget. The deliverable is an offline HTML report with the findings, the evidence and the review decisions with their justifications.
+
+![A SQL injection finding in the Security Journey: the route, the middleware chain and the handler lead to the query, with the evidence in the inspector](docs/images/codeaudit-sqli.png)
+
+```sh
+git clone https://github.com/Darrkkens/gitview && cd gitview && go install .   # Go 1.25
+
+cd ~/your-go-api
+gitview audit scan                        # static analysis, no AI involved
+gitview audit findings
+ollama pull gemma3:4b                     # optional, once: GitView never downloads models
+gitview audit serve                       # Security Journey in the browser, with Gemma and review
+gitview audit export -o security.html     # offline report for the client
+```
+
+To try it without a project of your own, the repository ships a small vulnerable API (and its safe variants) used by the tests:
+
+```sh
+gitview audit scan --module internal/audit/testdata/app
+gitview audit serve --module internal/audit/testdata/app
+```
+
+In the terminal UI, `s` opens CodeAudit and `g` asks Gemma about the selected finding.
+
+![Gemma's explanation of the finding, with the evidence it cited checked against the analysis](docs/images/codeaudit-ai.png)
+
+Design rules:
+
+- **The scanner works without AI.** The model never creates, confirms or closes a finding, and it cannot change a review state; it can only recommend one.
+- **Nothing leaves the machine by default.** Only loopback endpoints are accepted unless you pass `--ai-allow-remote`. Models are never downloaded. Comments and strings of the analysed repository are passed to the model as data, never as instructions, and secrets are redacted from the context.
+- **Uncertainty is stated, not hidden.** An IDOR is never confirmed automatically: it is shown as *Review Required — Authorization Not Established*. A public route is not reported as vulnerable just for being public. A finding that disappeared is not counted as fixed when the newer analysis is incomplete where it was.
+- **Bounded exports.** The offline report embeds only the excerpts it needs, redacted, never whole files.
+
+The rest of this README is in Portuguese; the CodeAudit section below has the full rule list and its limits.
+
+## Uso
 
 Monitor de alterações Git em tempo real no terminal. Cada arquivo modificado pode ser expandido ou recolhido individualmente, e os diffs se atualizam sozinhos. Inclui busca global nos diffs, exportação de relatórios, execução de testes, Code Flow e o Go Deep Inspector, para estudar código Go com evidências verificáveis.
 
@@ -37,6 +96,8 @@ Mouse: a roda rola o diff; clicar numa dica do rodapé (por exemplo `x Exportar`
 | `f` | Code Flow: chamadores e chamadas de uma função Go |
 | `i` | Go Deep Inspector: Data Flow, Execution Trace, Branch Explorer, Performance e SQL Explorer da mesma função |
 | `m` | Runtime Performance: mede um processo Go em execução pelo PID |
+| `a` | Repository Graph: o repositório inteiro como grafo navegável (exporta HTML) |
+| `s` | CodeAudit: auditoria de segurança, findings com evidências, Explain with Gemma e revisão |
 | `x` | Exportar relatório |
 | d | Alternar renderização Delta/nativa |
 | r | Atualizar agora (no painel de testes: reexecutar) |
@@ -410,6 +471,347 @@ Limites:
 - Índices são lidos dos `.sql` sem considerar a ordem das migrações nem o banco real.
 - Desafios de ramo só usam condições com operandos inteiros ou booleanos (tipos verificados pelo type checker) e os operadores `> < >= <= == != && || !`.
 
+## Repository Graph (`a`, `gitview graph`)
+
+Transforma o repositório Go inteiro em um grafo de conhecimento estrutural, navegável num HTML offline: módulos, pacotes, arquivos, structs, interfaces, funções, métodos, closures, rotas HTTP e operações SQL, ligados pelas relações encontradas no código. Nenhuma relação é deduzida pelo nome de uma função ou arquivo, nada do repositório é executado, e nenhum arquivo dele é modificado.
+
+```sh
+gitview graph export                                # gitview-graph.html, todos os módulos do repositório
+gitview graph export --output architecture.html
+gitview graph export --format json --output graph.json
+gitview graph export --format json --level packages # dataset filtrado
+gitview graph export --level packages               # HTML abre com todos os pacotes visíveis
+gitview graph export --include-source=false         # HTML sem o código-fonte
+gitview graph export --module backend               # só um módulo
+gitview graph stats                                 # métricas (também --json)
+```
+
+O arquivo nunca é sobrescrito sem `--overwrite`. Na TUI, `a` abre o painel de controle: escolha o escopo (repositório inteiro ou um módulo), `Enter` analisa em segundo plano (cancelável com `Esc`, sem bloquear o monitoramento do Git), `x` exporta o HTML e `J` o JSON (arquivos novos com data e hora, no diretório de exportação), e `o` abre o último HTML no navegador. Milhares de nós não são desenhados no terminal: a TUI controla, o HTML visualiza.
+
+### De onde vem cada relação
+
+O grafo é uma camada de transformação sobre os analisadores existentes (**Code Flow → Repository Graph Builder → dataset → visualização**). Não há um segundo motor de análise: o grafo reaproveita a análise do Code Flow, e o cache dela, que só recarrega um módulo quando os seus `.go`, `go.mod` ou `go.sum` mudam.
+
+| Relação | Origem | Confiança |
+|---|---|---|
+| `contains` (módulo → pacote → arquivo → declaração, função → closure) | go/packages, go/types, SSA | confirmed |
+| `imports` | declarações `import` (evidência: arquivo:linha; peso: arquivos que importam) | confirmed |
+| `calls`, `go`, `defer` | índice do Code Flow (SSA) | confirmed, likely, possible ou unresolved, como no Code Flow |
+| `handles` (rota → handler/middleware), `queries` (função → operação SQL) | reconhecedores do Code Flow (net/http, gin, chi, echo; pgx, database/sql, sqlx) | idem |
+| `implements` | `types.Implements` para cada tipo concreto e cada interface não vazia do mesmo módulo (method set do valor ou do ponteiro) | confirmed |
+| `embeds`, `references` (campos e assinaturas que usam tipos do módulo), `method` | declarações go/types | confirmed |
+
+- Toda aresta traz evidência (`go/ssa`, `go/types` ou `go/packages`, com arquivo e linha).
+- Várias chamadas entre as mesmas funções viram uma aresta com `weight` e a lista de locais.
+- Uma chamada sem destino determinável aponta para um nó `unresolved` explícito, nunca para um destino inventado. A completude da análise (`complete`/`partial` e os motivos) faz parte do dataset.
+
+### Dataset (`gitview.graph/v1`)
+
+- **IDs estáveis** derivados só do símbolo:
+  - `package:<import path>`, `file:<caminho>`, `type:<pkg>.<Nome>` e `func:<nome SSA>`. Por exemplo, `func:(*example.com/app/users.Service).GetUser`. Go não tem sobrecarga, então pacote, receiver e nome identificam a função, e as closures levam o sufixo `.func1`.
+  - Rotas, SQL, funções externas e chamadas não resolvidas mantêm os IDs do Code Flow.
+  - Duas execuções sobre o mesmo código produzem o mesmo arquivo, exceto pelos tempos e pela data.
+- Cada nó traz: tipo, pacote, arquivo:linha, assinatura, comunidade, grau (de entrada e de saída), posição, `metadata`, e `annotations`, reservado para análises futuras (findings de auditoria, por exemplo).
+- `--level` filtra o JSON:
+  - `packages`: pacotes e imports;
+  - `files`: arquivos, com arestas `depends` **derivadas** das relações entre as declarações, marcadas `derived`;
+  - `functions`: funções e chamadas;
+  - `types`: tipos e suas relações;
+  - `full`: tudo (padrão).
+
+### Comunidades e layout
+
+- **Comunidades** são detectadas com o algoritmo de Louvain (modularidade, resolução 1), de forma determinística:
+  - os nós são visitados em ordem de ID, e um nó só muda de comunidade quando o ganho é estritamente maior; os empates mantêm a comunidade atual e depois favorecem o menor índice;
+  - roda em dois níveis: pacotes (imports mais relações entre símbolos de pacotes diferentes) e símbolos (chamadas, relações de tipo e closures);
+  - o rótulo de cada comunidade é o nome do membro mais conectado. São grupos estruturais, não camadas arquiteturais.
+- **Layout** calculado no Go, também determinístico:
+  - Fruchterman–Reingold para os pacotes;
+  - os membros de cada pacote ficam num disco em volta dele;
+  - as posições ficam no JSON; o HTML organiza cada visão com o ELK (abaixo).
+
+### O HTML: Architecture Explorer
+
+Um único arquivo, que funciona por `file://`, sem servidor, CDN ou requisições de rede. A tela tem quatro partes:
+
+- **Barra superior:** nome do repositório, breadcrumbs (*Repository › módulo › diretório › pacote › arquivo › símbolo*), modo (**Architecture** ou **HTTP**) e busca.
+- **Explorer (esquerda):** a árvore inteira (módulos, diretórios, pacotes, arquivos, tipos, funções, métodos, closures, rotas, SQL e dependências externas), virtualizada e com filtro. Clicar num item o mostra no canvas.
+- **Canvas (centro):** o diagrama, desenhado em Canvas 2D.
+- **Inspector (direita):** o que está selecionado, em abas. Pode ser recolhido e redimensionado (arraste a borda; duplo clique volta à largura padrão).
+
+Exploração progressiva: a visão inicial mostra só os módulos e os seus diretórios e pacotes de primeiro nível. As relações entre o que está dentro deles aparecem como uma linha por par, com a contagem por tipo.
+
+- **Expandir e recolher:** duplo clique (ou `Enter`) abre um grupo dentro dele mesmo: um diretório mostra os pacotes, um pacote os arquivos, um arquivo as declarações, um tipo os métodos. Os níveis são *Repository → Module → Package → File → Symbol*.
+- **Escopo:** *Open as scope* faz de um grupo a raiz do canvas. O que fica fora e se relaciona com ele aparece em volta, tracejado, no nível mais grosso que ainda o distingue.
+- **Relações:** cada linha é a soma das relações do dataset entre o que as duas caixas contêm, com seta na direção da relação e o estilo da confiança mais forte entre elas: *confirmed* contínua, *likely* tracejada, *possible* pontilhada, *unresolved* tracejada em vermelho. Entre grupos, as relações seguem a hierarquia num tronco único. Os ramos até cada elemento interno só aparecem quando ele está selecionado ou sob o mouse.
+- **Seleção:** destaca o caminho completo de dependências. O que o elemento usa fica em azul, o que o usa fica em âmbar, os vizinhos diretos em traço forte e o resto do caminho mais claro. O que não se relaciona fica esmaecido. *Direct* limita o destaque aos vizinhos diretos.
+- **Foco (`.`):** só o elemento e o que se conecta a ele, da esquerda para a direita. Para funções: chamadores, a função e os chamados, de 0 a 6 níveis para cada lado. Para tipos: implementações, embeds, usos e métodos. Para pacotes e arquivos, o mesmo no nível de pacote ou arquivo. Cada coluna mantém as 36 relações mais fortes e informa quantas ficaram de fora.
+- **Controles do canvas:** zoom, ajustar à tela (`f`), minimapa (`m`), tela cheia (`Shift+F`) e filtros por tipo de elemento, tipo de relação e confiança. Dependências externas ficam ocultas até serem pedidas.
+- **Zoom semântico:** afastado, o canvas omite os textos pequenos, mas grupos e caixas grandes mantêm o nome legível.
+- **Inspector:**
+  - **Overview:** assinatura com realce de sintaxe Go, pacote, arquivo e linhas, receiver, camada (Study Mode, STATIC ou HEURISTIC), SQL, o que o elemento contém e a distribuição de confiança das suas relações.
+  - **Connections:** relações de saída (*depends on*) e de entrada (*used by*) separadas, por tipo, cada uma com a confiança e o arquivo:linha da evidência. Num grupo, as relações ficam agrupadas pelo pacote ou arquivo do outro lado. Qualquer item navega até o elemento.
+  - **Source:** o código da declaração com números de linha e realce, ou o arquivo inteiro.
+  - **Metadata:** ID estável, ID do Code Flow, comunidade, graus e atributos. Também traz *Copy link*.
+  - Em todas: *Copy name*, *Copy path* (arquivo:linha) e *Copy reference* (nome qualificado completo).
+- **Busca global** (`Ctrl+K` ou `/`): pacotes, arquivos, tipos, funções, rotas e SQL, com filtro por tipo (`Tab`).
+- **Histórico:** escopo, foco, expansões e seleção ficam na URL (`#m=arch&root=…&open=…&sel=…`). Recarregar mantém a visão, e *Voltar/Avançar* do navegador (ou `Alt+←`/`Alt+→`) percorrem escopos, focos e rotas. `?` mostra os atalhos.
+- **Temas:** escuro (padrão) e claro, em *Filters*.
+
+Implementação:
+
+- **Layout:** ELK.js 0.11.0 (Eclipse Layout Kernel, EPL-2.0), embutido em `internal/graph/export/assets/vendor` com a licença e o hash do arquivo original. Cada container é organizado separadamente (layered, de cima para baixo), do mais interno para fora, e o resultado fica em cache pelo conteúdo. Expandir um pacote recalcula só ele e os grupos que o contêm, e voltar a uma visão não recalcula nada. Containers com mais de 260 elementos são empacotados sem camadas. Foco e HTTP usam colunas fixas por distância.
+- **Código separado em partes:**
+  - templates `page/*.html` (cabeçalho, sidebar, canvas, inspector, sobreposições);
+  - o design system em `assets/css` (tokens de cor, tipografia e espaçamento, e os estilos de cada componente);
+  - um módulo JavaScript por componente em `assets/js`: dados e hierarquia, código-fonte, layout, renderizador, visões de arquitetura, foco e HTTP, requisições, árvore, inspector, busca, filtros e aplicação.
+- **Código-fonte:** os `.go` que o grafo descreve, e só eles. Ficam dentro do repositório, sem symlinks e até 2 MiB cada, vão compactados (gzip + base64) e só são descompactados quando a aba Source abre. `--include-source=false` exporta sem eles. O FaturAthos (1,98 MB de Go) acrescenta 0,6 MB à página.
+- **Segurança:** a Content-Security-Policy (`default-src 'none'`) permite só os scripts da página, cada um fixado por SHA-256, sem `connect-src` nem workers. Os dados e o código-fonte ficam em blocos inertes, e todo texto do repositório entra na página com `textContent`.
+- **Desempenho**, medido no Chrome headless com o FaturAthos (2.705 nós, 10.253 relações):
+  - visão inicial em cerca de 120 ms de layout;
+  - todos os 36 pacotes expandidos até os arquivos (252 caixas, 978 linhas) em 0,8 s;
+  - cada quadro em cerca de 1 ms de JavaScript;
+  - busca em 4 ms e seleção com destaque em 8 ms.
+
+Limites:
+
+- **Análise estática:** uma linha é uma relação que pode acontecer, não uma execução observada. `implements` só considera interfaces do mesmo módulo. Referências a tipos cobrem campos e assinaturas, não o corpo das funções.
+- **`--max-nodes`:** limita quantos elementos uma expansão pode desenhar. Acima dele, a página sugere abrir o grupo como escopo. O dataset embutido continua completo, e as posições calculadas no Go (Louvain e Fruchterman–Reingold) seguem no JSON.
+- **Tamanho:** o FaturAthos gera 6,9 MB: 5,2 MB de dados, 1,6 MB do ELK e 0,6 MB de código-fonte.
+- **Navegador:** a aba Source precisa de `DecompressionStream`, presente nos navegadores atuais. Sem ela, a aba avisa, e o resto continua funcionando.
+
+## Architecture Journey: HTTP Explorer (`gitview graph routes|journey`, aba HTTP do Repository Graph)
+
+Documenta e explora a API Go por análise estática. Para cada rota, mostra:
+
+- onde ela foi registrada;
+- os middlewares (globais, de grupo e da rota) e o handler;
+- os services, repositories e operações SQL que a cadeia pode alcançar;
+- os parâmetros, o corpo e as respostas que o código lê e escreve;
+- um exemplo de requisição em cURL.
+
+Nada é executado: o servidor da aplicação não é iniciado e nenhuma requisição é enviada.
+
+```sh
+gitview graph routes                                  # catálogo por prefixo
+gitview graph routes --format json
+gitview graph journey --route "POST /api/clients" --depth 4
+gitview graph journey --route "route:POST /api/clients@routes/clients.go:42"   # registro exato
+gitview graph export --output architecture.html       # HTML com a aba HTTP
+gitview graph export --format openapi --output openapi.json
+gitview graph export --format postman --output collection.json
+gitview graph export --include-http=false             # sem o catálogo
+```
+
+### Rotas
+
+A descoberta é a do Code Flow (gin, chi, echo, `net/http` e padrões `"GET /x/{id}"` do `ServeMux`), com o que o grafo precisava:
+
+- **Prefixos:** grupos e rotas aninhadas, routers recebidos como parâmetro (inclusive interfaces como `gin.IRoutes`), `chi.Route` e `chi.Mount`. O sub-router montado herda o prefixo e os middlewares do pai.
+- **Ordem dos middlewares:** cada middleware traz o escopo (global, group, router, route) e o local da chamada que o adicionou. No gin, um `Use` que roda depois do registro da rota (ou da criação do grupo) não é aplicado, como no gin real. Quando a ordem depende do caminho, o middleware é marcado `possible`.
+- **Handlers indiretos:** middlewares passados em `Group("/x", mw)` e `chi.With(mw)`, handlers montados por funções auxiliares e por closures que capturam variáveis (`with(h)` → `[]HandlerFunc{user, h}`).
+- **Caminhos dinâmicos:** um caminho calculado em tempo de execução mantém o prefixo constante (`/kinds/{dynamic}`) e é marcado como parcial; nunca vira uma rota inventada.
+
+O ID de uma rota inclui o local do registro: é o mesmo ID do nó do grafo.
+
+### Contratos
+
+O analisador interpreta o SSA da cadeia de cada rota. Ele segue os helpers que recebem valores HTTP (`*gin.Context`, `http.ResponseWriter`, `*http.Request`, `echo.Context`), com os argumentos de cada chamada. Assim, um status passado a `httpx.JSON(w, status, v)`, ou guardado no campo de um `*Error` criado por `NewError(http.StatusNotFound, …)` numa variável de pacote, é resolvido até a constante. O analisador não entra nos services.
+
+| Contrato | Origem reconhecida |
+|---|---|
+| Path | `c.Param`, `r.PathValue`, `chi.URLParam`, `ShouldBindUri` (tags `uri`) e o próprio padrão da rota |
+| Query, header, cookie, form | `c.Query`/`DefaultQuery`/`GetQuery`, `r.URL.Query().Get`, `r.FormValue`, `c.GetHeader`, `r.Header.Get`, `c.Cookie`/`r.Cookie`, `c.PostForm`, `c.FormFile`, `ShouldBindQuery`/`ShouldBindHeader` |
+| Corpo | `ShouldBindJSON`/`BindJSON`/`ShouldBind`/`ShouldBindWith`, `json.NewDecoder(r.Body).Decode` (com `DisallowUnknownFields`), `io.ReadAll(r.Body)` + `json.Unmarshal`, echo `Bind` |
+| Respostas | `c.JSON` e variantes, `AbortWithStatusJSON`, `c.Status`, `c.String`, `c.Data`, `c.Redirect`, `http.Error`, `http.NotFound`, `WriteHeader` + `json.Encoder.Encode`/`Write`, echo `JSON`/`NoContent`/`String` |
+| Autenticação | um middleware (ou o handler) que lê `Authorization` ou um cookie e pode responder 401. O esquema (`bearer`, `basic`) vem do prefixo comparado no código |
+| Servidor | `ListenAndServe`, `http.Server{Addr: …}`, `(*gin.Engine).Run`, echo `Start` |
+
+Como os valores são tratados:
+
+- **Schemas:** seguem as regras do `encoding/json` (tags, `-`, `omitempty`, `,string`, campos promovidos de structs embutidas, `MarshalJSON`/`MarshalText`, `time.Time`).
+- **Obrigatoriedade:** um campo só é obrigatório quando há uma regra `required` que a decodificação aplica. Tags `binding` valem para os binds do gin; tags `validate` valem só quando a cadeia chama o validator. Ponteiros não definem obrigatoriedade.
+- **Respostas:** cada uma traz status, content type, schema, origem (handler ou middleware), a cadeia de helpers até a escrita e a evidência. A base é `static` (status e corpo identificados), `partial` (um deles não) ou `unknown` (nenhum). O 200 implícito do `net/http` aparece como `possible`. Um status calculado em tempo de execução fica indeterminado, nunca é adivinhado.
+- **Mapas literais:** em `gin.H{...}` e `body["code"] = …`, as chaves constantes viram campos, marcando as que só existem em alguns caminhos e os mapas que podem ganhar chaves (`maps.Copy`).
+- **Tipos de parâmetro:** vêm de conversões diretas (`strconv.Atoi(c.Param("id"))` indica inteiro).
+
+### Exemplos, cURL e exportações
+
+- **Exemplos sintéticos:** os valores são determinísticos, escolhidos pelo tipo e pelas regras reconhecidas (`email` → `user@example.com`, `min=2`, `oneof=admin user` → `admin`, `uuid`). Quando há uma regra que o gerador não interpreta, o exemplo é marcado `unverified`. Nenhum dado vem da aplicação ou do banco.
+- **cURL:** usa a base URL do endereço de escuta encontrado no código, ou um placeholder identificado como tal. Credenciais são sempre placeholders (`Bearer <token>`), o escaping é POSIX e o corpo vai em `--data-raw`.
+- **OpenAPI 3.1:** `required` só para regras aplicadas, e `security` só quando o esquema é conhecido. O que não foi identificado fica em extensões `x-gitview-*`, como rotas de caminho dinâmico (`x-gitview-unresolved-routes`), status indeterminados (`default`), autenticação de nome dinâmico e evidências. Os documentos gerados para a fixture de testes e para um projeto real (134 rotas) foram validados contra o schema oficial 3.1.
+- **Postman Collection v2.1:** uma pasta por grupo. Variáveis de caminho, query e headers lidos pelo código, com os opcionais desativados, e o corpo sintético. A base URL fica em `{{baseUrl}}` e o token em `{{token}}`, que começa vazio.
+
+### No HTML
+
+O modo **HTTP** (`2`) do Architecture Explorer:
+
+- **Endpoints (esquerda):** agrupados por módulo e método. Também podem ser agrupados por prefixo do caminho, pacote do handler ou arquivo de registro. Há busca, filtro por método e filtros de autenticação e contrato parcial.
+- **Journey (centro):** a rota, a cadeia de middlewares na ordem de registro e o handler. Depois vêm o que a cadeia pode chamar, coluna por profundidade (3 por padrão), e o SQL.
+  - A faixa *Route → Middleware → Handler (controller) → Service → Repository → Database* conta os passos de cada camada no grafo desenhado. Camadas sem passo ficam tracejadas: nenhuma etapa é inventada.
+  - Clicar numa camada destaca os seus passos.
+  - Duplo clique abre ou recolhe as chamadas de um passo (`+N` indica as ocultas). Chamadas externas aparecem com *external calls*.
+  - Cada passo é um elemento do grafo: selecionado, o inspector mostra assinatura, arquivo, linha, código-fonte e conexões.
+- **Rota (inspector), em abas:**
+  - **Overview:** handler, cadeia, autenticação e passos por camada.
+  - **Request:** construtor no estilo Postman (base URL, parâmetros, headers e corpo editáveis, *Example | Schema*), com cURL atualizado ao vivo, *Copy* e *Export*. Não há botão *Send*: a página não envia requisições.
+  - **Response:** cada status com schema, exemplo sintético, origem e base.
+  - **Flow:** a árvore do grafo desenhado.
+  - **Source:** o registro da rota e o código do handler.
+  - **Evidence:** cada relação com arquivo:linha e confiança.
+- `#m=http&route=…&tab=…` funciona como deep link. *In architecture* leva o registro da rota ao modo Architecture.
+
+A página continua um arquivo único e offline, com a mesma CSP. No HTML, cada item embute até 3 evidências e o total; o JSON (`--format json`) traz todas.
+
+### Limites
+
+- **Análise estática:** um caminho no grafo de execução é um caminho possível, não a execução de uma requisição.
+- **Status:** um status guardado em estruturas indiretas (o campo de uma struct recebida como parâmetro, `errors.As`) fica indeterminado.
+- **Profundidade:** helpers com mais de 6 chamadas de profundidade não são seguidos, e a rota é marcada como parcial.
+- **Fora do alcance:**
+  - frameworks além de gin, chi, echo e `net/http` (a análise é por adaptadores e pode ganhar outros, como o Fiber);
+  - rotas `Static` e `NoRoute` do gin;
+  - binds que dependem de um `Content-Type` decidido em tempo de execução, que aparecem com todos os decodificadores possíveis.
+
+## CodeAudit: Security Journey (`s`, `gitview audit`, modo Security do HTML)
+
+Auditoria de segurança do código Go com evidências verificáveis.
+
+- **Base:** o CodeAudit roda regras determinísticas sobre as análises que o GitView já faz: o call graph e as rotas do Code Flow, os rastreamentos do Data Flow, o SQL Explorer e o catálogo HTTP do Repository Graph.
+- **Findings:** cada finding diz onde está, por que foi sinalizado, de qual entrada vem o dado, por quais rotas pode ser alcançado e como corrigir e testar.
+- **IA:** um modelo local (Ollama, Gemma por padrão) pode explicar um finding ou um caminho, mas só quando pedido. O scanner funciona sem ela, e o modelo nunca cria, confirma ou fecha um finding.
+- **Segurança:** nada do repositório é executado ou modificado.
+
+```sh
+gitview audit scan                             # analisa e grava um snapshot
+gitview audit scan --vulndb ~/go-vulndb         # verifica dependências numa base OSV local
+gitview audit findings --severity high          # lista, com o estado de revisão
+gitview audit show finding:injection:a7758c6a   # evidências, caminho dos dados, rotas, código
+gitview audit review <ID> --status confirmed --note "reproduzido em staging"
+gitview audit history <ID>
+gitview audit diff                              # compara as duas últimas auditorias
+gitview audit explain <ID>                      # pergunta ao modelo local
+gitview audit explain-path --from <nó> --to <nó>
+gitview audit export -o security.html           # Security Journey offline
+gitview audit serve                             # Security Journey com IA e revisão (127.0.0.1)
+gitview audit rules | models
+```
+
+### Regras
+
+| Regra | Categoria | O que procura |
+|---|---|---|
+| GO-INJ-001 | injection | SQL montado em tempo de execução cuja parte variável vem de entrada HTTP. Quando a origem não é determinável e o SQL é alcançável por rota, vira finding `incomplete` |
+| GO-INJ-002 | injection | `os/exec` com programa, script de shell (`sh -c`) ou argumentos vindos de entrada HTTP |
+| GO-INJ-003 | injection | Caminho de arquivo vindo de entrada HTTP: `os.Open`, `ReadFile`, `WriteFile`, `Remove`, `http.ServeFile`, `c.File`… |
+| GO-INJ-004 | injection | Redirect para URL vinda de entrada HTTP |
+| GO-AUTHN-001 | authentication | Rota sem autenticação reconhecida que pode escrever no banco ou rodar comando. Rota pública não é vulnerável por si: pede confirmação |
+| GO-AUTHN-002 | authentication | Cookie sem `Secure` ou `HttpOnly` (literal `http.Cookie`, `SetCookie` do gin) |
+| GO-AUTHN-003 | authentication | JWT sem verificação: `ParseUnverified`, método `none` |
+| GO-AUTHZ-001 | authorization | Identificador de recurso vindo da requisição chega a SELECT, UPDATE ou DELETE sem condição em coluna de dono ou tenant preenchida fora da requisição: **Review Required — Authorization Not Established**, nunca "IDOR confirmado" |
+| GO-AUTHZ-002 | authorization | Rota em caminho administrativo sem elemento da cadeia que responda 403 depois da autenticação (heurística pelo caminho) |
+| GO-DATA-001 | sensitive-data | Segredos no código: formatos reconhecíveis (chaves privadas, tokens de nuvem e de API) ou constantes atribuídas a nomes como `password`, `secret`, `token`. O valor nunca é mostrado |
+| GO-DATA-002 | sensitive-data | `err.Error()` no corpo de resposta 5xx |
+| GO-DATA-003 | sensitive-data | Campos como `passwordHash` ou `secret` nos schemas de resposta do catálogo HTTP |
+| GO-DATA-004 | sensitive-data | Credenciais em logs: valores vindos do `Authorization`, de cookies, de senhas |
+| GO-CONF-001 | configuration | CORS com `*` ou refletindo o `Origin`, sobretudo com `Allow-Credentials` |
+| GO-CONF-002 | configuration | `InsecureSkipVerify: true`, `MinVersion` abaixo de TLS 1.2 |
+| GO-CONF-003 | configuration | Servidor sem `ReadHeaderTimeout`/`ReadTimeout` (`ListenAndServe`, `Run` do gin), `http.Client` sem `Timeout` |
+| GO-CONF-004 | configuration | `gin.SetMode(gin.DebugMode)`, `net/http/pprof` com o `DefaultServeMux` servido |
+| GO-DEP-001 | dependencies | Módulo do `go.mod` numa versão afetada segundo a base OSV local configurada (formato da Go vulnerability database). Se o advisory lista símbolos, confere se são chamados |
+
+Regras importantes e seus limites:
+
+- **Data Flow:** a fonte é entrada HTTP (path, query, form, header, cookie, corpo JSON, binds do gin e do echo).
+- **Sanitização:** só conta quando a semântica é conhecida. Conversão para número, booleano ou UUID neutraliza tudo, e `filepath.Base` neutraliza caminhos. Uma transformação qualquer não é sanitização.
+- **Validações:** um `if` que domina a operação e examina o valor, como `sites.Allowed(origin)` ou `strings.HasPrefix(p, base)`, entra como validação. O veredito vira review, porque a suficiência não é comprovada.
+- **Autorização:**
+  - Só conta como verificação de autorização um 403 respondido **depois** da autenticação. Um 403 antes dela, como um filtro de origem, aparece como "request filter".
+  - Endpoints que se autenticam sozinhos (login, webhook com assinatura) ficam fora de GO-AUTHZ-001.
+  - Com as migrações `.sql` do repositório, GO-AUTHZ-001 sabe quais tabelas têm coluna de dono ou tenant. Isso sobe a confiança quando a query não a usa e descarta tabelas sem dono, como dados de referência.
+- **Dependências:** sem base configurada, a auditoria registra "dependencies not checked". Uma base com mais de 30 dias é marcada como possivelmente desatualizada. CVEs nunca são inventados.
+- **Configuração:** as regras e a base de vulnerabilidades vêm de flags (`--rules`, `--disable`, `--vulndb`) ou de `GITVIEW_VULNDB`, nunca do `.gitview.json`. Um repositório não pode desligar as próprias regras.
+- **Data Flow, correções feitas para isto:** passou a seguir os elementos de argumentos variádicos (`filepath.Join(base, input)`) e os binds do gin e do echo (`ShouldBindJSON`…).
+
+### Findings
+
+- **Campos separados:** severidade (o impacto se for real), confiança (a força da evidência estática: confirmed, likely, possible), veredito da análise (vulnerable, review, incomplete), estado de revisão (decisão de uma pessoa), completude (complete, partial, com os limites listados) e origem (sempre `static-rule`).
+- **Evidências:** cada evidência (`ev-001`…) tem tipo (source, propagation, transformation, sanitizer, validation, sink, check, absence, config, dependency), base (static ou heuristic), arquivo e linha, código (com segredos redigidos) e a análise que a produziu.
+- **ID estável:** vem da regra, do símbolo e do código normalizado da chamada sensível, nunca do número da linha. Mover o código não muda o ID; mudar o código muda o `codeHash`, o que pede revalidação de uma decisão.
+- **Rotas e caminho:** cada finding traz as rotas que podem alcançá-lo, com o caminho rota → middlewares → handler → chamadas → operação, a confiança de cada chamada e as verificações identificadas em cada passo.
+
+### Explain with Gemma
+
+- **Provedor:** Ollama local.
+  - O modelo padrão é o **menor** Gemma instalado, que é o que cabe na memória e responde em tempo razoável. Um maior se escolhe com `--model` ou `GITVIEW_AI_MODEL`.
+  - Nenhum modelo é baixado nem o Ollama é instalado ou iniciado: `gitview audit models` mostra o estado.
+- **Endereço:** padrão `127.0.0.1:11434` (ou `GITVIEW_OLLAMA_URL`/`OLLAMA_HOST`). Qualquer endereço fora desta máquina exige `--ai-allow-remote`, e redirecionamentos para outro host são recusados.
+- **Contexto (Context Builder):**
+  - o finding e as suas evidências;
+  - o caminho de execução e o de dados;
+  - as verificações e as relações não resolvidas;
+  - trechos de código, cada um com o ID da evidência.
+- **Limites do contexto:**
+  - orçamento de tokens estimado (`--ai-max-tokens`);
+  - profundidade;
+  - deduplicação de linhas;
+  - redação de segredos (formatos, atribuições, senhas em DSN; a linha de um segredo detectado perde todas as strings).
+  - O repositório inteiro nunca é enviado.
+- **Instruções:** o código vai como dado delimitado, e as instruções dizem que comentários e strings do repositório não são instruções.
+- **Pedido:** resposta estruturada por JSON Schema e temperatura 0,1.
+- **Validação da resposta:**
+  - o schema;
+  - os IDs de evidência;
+  - as referências, cujo arquivo, intervalo de linhas e símbolo precisam bater com os trechos enviados;
+  - as menções `arquivo.go:linha` no texto.
+  - Referências inventadas são removidas e listadas como rejeitadas. Respostas inválidas não entram no cache.
+- **Cache:** por hash do contexto, versão do prompt, modelo e digest do modelo.
+- **Timeout e cancelamento:** timeout de 10 minutos (`--ai-timeout`, já que a inferência em CPU é lenta); Ctrl+C, Esc ou o botão Cancel interrompem.
+- **Estado sugerido:** a IA pode sugerir um estado, mostrado como sugestão não aplicada.
+- **Explain This Path** (`explain-path`, ou Shift+clique em dois passos do grafo): a IA recebe o caminho entre dois nós do grafo, com o código de cada passo e os fluxos e verificações dos findings ao longo dele.
+
+### Revisão, comparação e relatório
+
+- **Revisões:**
+  - Estados: open, investigating, confirmed, false_positive, accepted_risk, fixed e needs_revalidation. confirmed, false_positive, accepted_risk e fixed exigem justificativa.
+  - O histórico guarda data, estado anterior, novo estado, justificativa, commit analisado e o `codeHash`.
+  - Um finding marcado fixed que reaparece, ou cujo código mudou depois da decisão, é sinalizado para revalidação. O estado não muda sozinho.
+- **Armazenamento:** snapshots, revisões e investigações ficam no cache do GitView (`GITVIEW_CACHE_DIR`), fora do repositório; `--state` ou `GITVIEW_AUDIT_DIR` escolhem outro diretório.
+- **`gitview audit diff`:** New, Resolved, Unchanged, Changed (severidade, veredito, confiança, código ou caminhos). Um finding ausente só conta como resolvido se a regra rodou, a análise do arquivo não ficou incompleta e não há finding da mesma regra na mesma função. Os outros casos aparecem em "Not confirmed gone", com o motivo.
+- **Relatório (`gitview audit export`):** o Architecture Explorer com o modo **Security**.
+  - **Sidebar:** findings por categoria, com filtros de severidade, categoria e estado; rotas com a postura de segurança; regras.
+  - **Grafo:** o caminho rota → middlewares → handler → service → repository → operação, colorido pelo estado e sempre com o rótulo em texto. Verde: verificação identificada; amarelo: revisão necessária; vermelho: vulnerável pela evidência ou confirmado na revisão; cinza: incompleto ou não resolvido; azul: estrutural.
+  - **Inspector:** abas Overview, Evidence, Source, Flow, Fix, AI e Review, mais um relatório completo para impressão.
+  - **Trechos:** o HTML embute **só os trechos** apontados pelos findings, redigidos, nunca arquivos inteiros. As análises da IA aparecem separadas, marcadas como interpretação do modelo.
+  - **Offline:** o arquivo continua offline, com a CSP sem `connect-src`. Para pedir explicações ou revisar no navegador, use `gitview audit serve`.
+- **`gitview audit serve`:** abre a mesma página num servidor em `127.0.0.1` com token aleatório. A API (`/api/explain`, `/api/explain-path`, `/api/review`) exige o token, recusa Host e Origin estranhos e limita o corpo; a CSP permite `connect-src 'self'`.
+- **TUI (`s`):**
+  - `r` analisa em segundo plano (Esc cancela);
+  - ↑↓ e Enter mostram evidências e código;
+  - `g` pergunta ao Gemma;
+  - `1`…`7` revisam, com justificativa;
+  - `c` compara;
+  - `x` e `o` exportam e abrem o relatório.
+  - A linha do topo mostra o estado do Ollama.
+
+### Validação
+
+- **Fixture** (`internal/audit/testdata`): um caso inseguro por regra e variantes seguras: SQL parametrizado, `%d` após `Atoi`, `filepath.Base`, filtro de tenant, verificação de papel, cookie seguro, nome de campo e placeholder que não são segredos, servidor com timeouts e advisory de outra versão.
+  - Os testes conferem a precisão de cada regra, a ausência de falsos positivos conhecidos, o caminho e as evidências (o código citado é o do arquivo), os IDs estáveis com as linhas deslocadas, que nenhum segredo aparece na saída e a análise incompleta.
+  - A camada de IA é testada contra um Ollama simulado: endereço remoto recusado, escolha do modelo sem download, referências inventadas rejeitadas, JSON inválido, timeout, cancelamento, cache e orçamento.
+  - Também há testes da CLI, da TUI e das proteções do servidor.
+- **FaturAthos** (134 rotas): o scan completo leva 1,5 s (a auditoria, 0,35 s) e gera 16 findings:
+  - 4 rotas públicas de autenticação que escrevem dados, para revisão;
+  - o CORS com allow-list, em revisão;
+  - 11 SQL dinâmicos de origem não determinada.
+  - Serviram para corrigir falsos positivos que a fixture não tinha (allow-list, 403 antes da autenticação, dados de referência).
+- **Modelo real:** com o gemma3:4b em CPU, uma explicação leva cerca de 3,5 minutos.
+- **Limites:**
+  - fluxos através de memória que o Data Flow não segue ficam incompletos;
+  - validações em funções chamadoras não são vistas pela detecção de condições;
+  - autorização feita fora da cadeia (gateway, RLS) não é visível;
+  - a qualidade do texto do modelo varia (o validador confere as referências, não a correção da prosa).
+
 ## Configuração (`.gitview.json` na raiz do repositório)
 
 ```json
@@ -441,7 +843,9 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/flow` | Índice de símbolos, call graph (SSA), rotas HTTP, operações de banco, consultas callers/callees, identidade de símbolos compartilhada |
 | `internal/evidence` | Modelo de evidências (estático, observado, estimado), status de completude, identidade de símbolo, artefatos |
 | `internal/inspect` | Go Deep Inspector: sessão, cache por versão do código, visões por símbolo |
-| `internal/inspect/dataflow` | Data Flow: def-use do SSA, entre funções, fontes, destinos, validações |
+| `internal/inspect/dataflow` | Data Flow: def-use do SSA, entre funções, fontes (HTTP, binds do gin/echo, env, linhas do banco), destinos, validações |
+| `internal/audit` | CodeAudit: regras de segurança, findings com evidências e IDs estáveis, associação a rotas, schema das migrações, snapshots, revisões, comparação, dados do relatório |
+| `internal/audit/ai` | AI Security Investigator: cliente Ollama (só loopback sem permissão), Context Builder com orçamento e redação, validação das respostas, cache |
 | `internal/inspect/branch` | Branch Explorer: CFG (`go/cfg`), caminhos, métricas, sobreposição de cobertura |
 | `internal/inspect/sqlops` | SQL Explorer estático: operações, SQL, parâmetros, Scan, transações, formatação, classificação, estrutura da instrução e índices declarados em `.sql` |
 | `internal/inspect/pgexplain` | EXPLAIN no PostgreSQL, com conexão explícita e regras de segurança |
@@ -455,7 +859,12 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/live/srcmap` | Source Mapper: quadros, rotas e chamadas SQL → símbolos do Code Flow e operações do SQL Explorer |
 | `internal/live/capture` | Sessões de captura (fases, pausa, limites) e histórico em disco |
 | `internal/live/report` | Report Engine: análise por fase e por rota, base de cada número, comparação |
+| `internal/graph` | Repository Graph: `model` (schema v1, catálogo HTTP), `analyzer` (Code Flow + go/types → nós e arestas), `httpapi` (contratos HTTP, exemplos, cURL, grafo de execução de rotas), `builder` (merge, graus, Louvain, camadas), `layout`, `export` (JSON, HTML Architecture Explorer com ELK.js, OpenAPI 3.1, Postman v2.1) |
 | `internal/study` | Study Mode: modelo determinístico (arquitetura, ordem de leitura, jornadas, decisões, testes, SQL, desempenho, exercícios) a partir das análises existentes |
 | `internal/pbwire` | Decodificador do formato protobuf (pprof, OTLP) |
 | `collector/`, `collector/pgxtracer` | Módulos opcionais (só biblioteca padrão / pgx) para instrumentar a aplicação |
-| raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance; CLI `flow`, `inspect` e `runtime` |
+| raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance e Repository Graph; CLI `flow`, `inspect`, `runtime` e `graph` |
+
+## Licença
+
+[MIT](LICENSE). O ELK.js incluído em `internal/graph/export/assets/vendor/` mantém a própria licença ([EPL-2.0](internal/graph/export/assets/vendor/LICENSE.elk.md)).

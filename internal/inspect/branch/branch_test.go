@@ -253,7 +253,13 @@ func TestCoverageOverlay(t *testing.T) {
 		t.Errorf("summary %+v", g.Coverage)
 	}
 	// A profile older than the source is stale: everything becomes unknown.
-	old := time.Now().Add(-48 * time.Hour)
+	// The age is relative to the source file, not to the clock, so the test
+	// does not depend on when the fixture was last edited.
+	src, err := os.Stat(filepath.Join(p.RepoRoot, g.Symbol.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := src.ModTime().Add(-time.Hour)
 	os.Chtimes(out, old, old)
 	pr, _ = LoadProfile(out)
 	g, _ = Build(p, inspecttest.Func(t, p, "branches.GetClient"), Options{Coverage: pr})

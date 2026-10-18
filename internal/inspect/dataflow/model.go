@@ -11,6 +11,8 @@
 package dataflow
 
 import (
+	"sort"
+
 	"github.com/athos/gitview/internal/evidence"
 )
 
@@ -233,8 +235,15 @@ func (r *Result) HideIntermediate() *Result {
 	if len(hidden) == 0 {
 		return &out
 	}
-	edges := append([]*Edge(nil), r.Edges...)
+	// Contract in ID order: the order of the resulting edges decides ties
+	// between paths of equal length, so it must not depend on map order.
+	ids := make([]int, 0, len(hidden))
 	for id := range hidden {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	edges := append([]*Edge(nil), r.Edges...)
+	for _, id := range ids {
 		var in, outE, rest []*Edge
 		for _, e := range edges {
 			switch {

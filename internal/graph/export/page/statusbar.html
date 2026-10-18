@@ -1,0 +1,9 @@
+{{define "statusbar"}}<footer class="statusbar" id="statusbar">
+  <span id="status-view"></span>
+  <span class="grow"></span>
+  <span id="status-analysis"></span>
+  <span title="The page contains everything it shows: it makes no network request.">offline</span>
+  <span title="Relations come from static analysis of the code (go/packages, go/types, SSA), not from observing it run.">static analysis · {{.Nodes}} nodes · {{.Edges}} relations{{if .Routes}} · {{.Routes}} routes{{end}}</span>
+  <span>generated {{.Generated}}</span>
+</footer>
+{{end}}

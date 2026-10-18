@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/athos/gitview/internal/flow"
 	"github.com/athos/gitview/internal/inspect"
@@ -221,6 +222,9 @@ func withBundles(t *testing.T, in Inputs) Inputs {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The fixture profile describes the fixture sources; a checkout
+		// gives the files arbitrary times, so it must not look stale.
+		prof.ModTime = time.Now()
 		sess.Coverage = prof
 	}
 	for _, id := range Plan(in) {

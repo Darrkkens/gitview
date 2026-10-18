@@ -1,0 +1,22 @@
+{{define "header"}}<header class="topbar" id="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="4" r="2.2"/><circle cx="12" cy="8" r="2.2"/><circle cx="4" cy="12" r="2.2"/><path d="M4 6.2v3.6M6 4.6l4 2.4M6 11.4l4-2.4"/></svg>
+    <span class="product">GitView</span>
+    <span class="slash">/</span>
+    <span class="repo" id="repo-name" title="{{.Repository}}">{{.Repository}}</span>
+  </div>
+  <nav class="crumbs" id="crumbs" aria-label="Location"></nav>
+  <div class="topbar-actions">
+    <div class="modes" role="tablist" aria-label="Mode" id="modes">
+      <button type="button" role="tab" data-mode="arch" aria-selected="true">Architecture</button>
+      <button type="button" role="tab" data-mode="http" aria-selected="false">HTTP</button>
+      {{if .Security}}<button type="button" role="tab" data-mode="security" aria-selected="false">Security</button>{{end}}
+    </div>
+    <button type="button" class="search-trigger" id="search-open" title="Search everything (Ctrl+K or /)">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+      <span>Search</span><kbd>Ctrl K</kbd>
+    </button>
+    <button type="button" class="icon-btn" id="help-open" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+  </div>
+</header>
+{{end}}

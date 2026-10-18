@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" width="1000" height="420" role="img" aria-label="GitView CodeAudit: local security audit for Go backends">
+  <rect width="1000" height="420" fill="#0e1116"/>
+  <!-- a faint route path: route, middlewares, handler, sink -->
+  <g fill="none" stroke="#2a3340" stroke-width="2" stroke-dasharray="4 6">
+    <path d="M760 70v58M760 166v58M760 262v58"/>
+  </g>
+  <g font-family="DejaVu Sans Mono, monospace" font-size="15">
+    <rect x="650" y="40" width="220" height="32" rx="6" fill="#13171d" stroke="#4c9aff"/>
+    <text x="666" y="61" fill="#e3e7ed">GET /api/orders/:id</text>
+    <rect x="650" y="136" width="220" height="32" rx="6" fill="#13171d" stroke="#3fb950"/>
+    <text x="666" y="157" fill="#e3e7ed">✓ Auth middleware</text>
+    <rect x="650" y="232" width="220" height="32" rx="6" fill="#13171d" stroke="#2a3340"/>
+    <text x="666" y="253" fill="#e3e7ed">handlers.Order</text>
+    <rect x="650" y="328" width="220" height="32" rx="6" fill="#1f1a10" stroke="#d29922"/>
+    <text x="666" y="349" fill="#f0c674">Review Required</text>
+  </g>
+  <g transform="translate(64 64) scale(4.5)">
+    <path d="M4 6.2v3.6M6 4.6l4 2.4M6 11.4l4-2.4" fill="none" stroke="#4c9aff" stroke-width="1.5" stroke-linecap="round"/>
+    <circle cx="4" cy="4" r="2.2" fill="#4c9aff"/>
+    <circle cx="12" cy="8" r="2.2" fill="#4c9aff"/>
+    <circle cx="4" cy="12" r="2.2" fill="#4c9aff"/>
+  </g>
+  <g font-family="DejaVu Sans, sans-serif">
+    <text x="64" y="200" fill="#e3e7ed" font-size="56" font-weight="bold">GitView</text>
+    <text x="64" y="248" fill="#8cc0ff" font-size="28">CodeAudit</text>
+    <text x="64" y="300" fill="#aab2bf" font-size="20">Security audit for Go backends.</text>
+    <text x="64" y="330" fill="#aab2bf" font-size="20">Evidence first, explained by Gemma,</text>
+    <text x="64" y="360" fill="#aab2bf" font-size="20">and your code never leaves your machine.</text>
+  </g>
+</svg>

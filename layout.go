@@ -218,6 +218,8 @@ var diffHelp = []keyHint{
 	{"f", "Code Flow: chamadores e chamadas de uma função Go"},
 	{"i", "Go Deep Inspector: Data Flow, Trace, Branches, Performance, SQL"},
 	{"m", "Runtime Performance: medir um processo Go em execução (PID)"},
+	{"a", "Repository Graph: o repositório inteiro como grafo (exporta HTML)"},
+	{"s", "CodeAudit: auditoria de segurança, Security Journey e Explain with Gemma"},
 	{"x", "exportar relatório"},
 	{"d", "alternar renderização Delta / nativa"},
 	{"r", "atualizar agora"},
@@ -263,6 +265,10 @@ func (m *model) helpRows() []keyHint {
 		return testsHelp
 	case screenRuntime:
 		return runtimeHelp
+	case screenGraph:
+		return graphHelp
+	case screenAudit:
+		return auditHelp
 	case screenFlow:
 		if m.insp.tab != tabCodeFlow && m.flow.phase == phaseGraph {
 			return inspHelp

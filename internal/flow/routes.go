@@ -2,6 +2,7 @@ package flow
 
 import (
 	"go/constant"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -25,6 +26,13 @@ type routeHandler struct {
 	conf       string
 	middleware bool
 	note       string
+	// Where the handler joined the chain: "global" (Use on the root
+	// router), "group" (Use on a group, or Group/With arguments), "router"
+	// (Use on a router received as a parameter) or "route" (an argument of
+	// the registration). file/line locate that call.
+	scope string
+	file  string
+	line  int
 }
 
 type routerLib struct {
@@ -33,6 +41,10 @@ type routerLib struct {
 	methods map[string]string // registration method → HTTP method ("" = any, "*" = taken from an argument)
 	group   map[string]bool   // methods returning a sub-router with a path prefix
 	use     map[string]bool   // methods adding middleware to a router
+	// ordered: Use only affects routes registered after it (gin copies the
+	// handler chain when a route or group is created); "groups" restricts
+	// it to sub-routers (echo applies root middleware to every request).
+	ordered string
 }
 
 var httpVerbs = map[string]string{
@@ -44,12 +56,12 @@ var routerLibs = []routerLib{
 	{
 		name: "gin", pkgs: []string{"github.com/gin-gonic/gin"},
 		methods: merge(httpVerbs, map[string]string{"Any": "", "Handle": "*"}),
-		group:   map[string]bool{"Group": true}, use: map[string]bool{"Use": true},
+		group:   map[string]bool{"Group": true}, use: map[string]bool{"Use": true}, ordered: "all",
 	},
 	{
 		name: "echo", pkgs: []string{"github.com/labstack/echo/v4", "github.com/labstack/echo"},
 		methods: merge(httpVerbs, map[string]string{"Any": "", "Add": "*"}),
-		group:   map[string]bool{"Group": true}, use: map[string]bool{"Use": true},
+		group:   map[string]bool{"Group": true}, use: map[string]bool{"Use": true}, ordered: "groups",
 	},
 	{
 		name: "chi", pkgs: []string{"github.com/go-chi/chi/v5", "github.com/go-chi/chi"},
@@ -58,7 +70,9 @@ var routerLibs = []routerLib{
 			"Options": "OPTIONS", "Connect": "CONNECT", "Trace": "TRACE", "Handle": "", "HandleFunc": "",
 			"Method": "*", "MethodFunc": "*", "Mount": "",
 		},
-		group: map[string]bool{"Route": true}, use: map[string]bool{"Use": true},
+		// With returns the same router with inline middleware; Use after a
+		// route panics in chi, so order never needs checking.
+		group: map[string]bool{"Route": true, "With": true, "Group": true}, use: map[string]bool{"Use": true},
 	},
 	{
 		name: "net/http", pkgs: []string{"net/http"},
@@ -114,12 +128,31 @@ type routeScan struct {
 	// prefix contexts for chi-style callbacks: Route("/x", func(r Router){...})
 	fnPrefix map[*ssa.Function][]string
 	// middleware registered with Use, keyed by the router value
-	uses map[ssa.Value][]routeHandler
+	uses map[ssa.Value][]useCall
+	// chi sub-routers mounted with Mount(pattern, router): the prefixes of
+	// the router value created by chi.NewRouter().
+	mounted map[ssa.Value][]string
+	// Mount calls whose handler is a sub-router (not a route themselves).
+	mounts map[ssa.CallInstruction]bool
+	// mountedOn is the parent router (and the Mount call) of a sub-router:
+	// the parent's middleware runs before the sub-router's.
+	mountedOn map[ssa.Value][]mountRef
+}
+
+type mountRef struct {
+	parent ssa.Value
+	ins    ssa.CallInstruction
+}
+
+type useCall struct {
+	h   routeHandler
+	ins ssa.CallInstruction
 }
 
 func (p *Program) findRoutes() {
-	s := &routeScan{p: p, fnPrefix: map[*ssa.Function][]string{}, uses: map[ssa.Value][]routeHandler{}}
-	// First pass: chi Route/Group callbacks and Use calls.
+	s := &routeScan{p: p, fnPrefix: map[*ssa.Function][]string{}, uses: map[ssa.Value][]useCall{},
+		mounted: map[ssa.Value][]string{}, mounts: map[ssa.CallInstruction]bool{}, mountedOn: map[ssa.Value][]mountRef{}}
+	// First pass: chi Route/Group callbacks, Mount and Use calls.
 	for _, fn := range p.funcs {
 		forEachCall(fn, func(c *ssa.CallCommon, ins ssa.CallInstruction) {
 			pkg, name, recv, args := calleeOf(c)
@@ -130,7 +163,27 @@ func (p *Program) findRoutes() {
 			switch {
 			case lib.use[name]:
 				key := routerKey(recv)
-				s.uses[key] = append(s.uses[key], s.handlerArgs(args, true)...)
+				file, line := p.site(ins.Pos())
+				for _, h := range s.handlerArgs(args, true) {
+					h.file, h.line = file, line
+					s.uses[key] = append(s.uses[key], useCall{h, ins})
+				}
+			case lib.name == "chi" && name == "Mount" && len(args) == 2:
+				routers := s.p.routerValues(args[1], 0)
+				if len(routers) == 0 {
+					return
+				}
+				s.mounts[ins] = true
+				seg, ok := constString(args[0])
+				if !ok {
+					seg = "{unknown}"
+				}
+				for _, rv := range routers {
+					s.mountedOn[rv] = append(s.mountedOn[rv], mountRef{recv, ins})
+					for _, pre := range s.prefixes(recv, 0) {
+						s.mounted[rv] = append(s.mounted[rv], joinPath(pre, seg))
+					}
+				}
 			case lib.name == "chi" && (name == "Route" || name == "Group"):
 				prefixes := s.prefixes(recv, 0)
 				if name == "Route" && len(args) > 0 {
@@ -165,6 +218,9 @@ func (p *Program) findRoutes() {
 			}
 			if lib.name == "net/http" && recv != nil && !isServeMux(recv.Type()) {
 				return
+			}
+			if s.mounts[ins] {
+				return // a mounted sub-router: its routes carry the prefix
 			}
 			s.register(lib, name, verb, recv, args, ins)
 		})
@@ -206,7 +262,8 @@ func (s *routeScan) register(lib *routerLib, name, verb string, recv ssa.Value, 
 	}
 	pattern, ok := constString(rest[0])
 	if !ok {
-		pattern, r.partial = "{dynamic}", true
+		// Keep a constant prefix: "/kinds/" + kind → /kinds/{dynamic}.
+		pattern, r.partial = constPrefix(rest[0])+"{dynamic}", true
 		r.notes = append(r.notes, "path is computed at runtime")
 	}
 	if lib.name == "net/http" {
@@ -233,9 +290,12 @@ func (s *routeScan) register(lib *routerLib, name, verb string, recv ssa.Value, 
 	// Middleware from Use on this router and its parents runs first.
 	var chain []routeHandler
 	if recv != nil {
-		chain = append(chain, s.middlewareOf(recv, 0)...)
+		chain = append(chain, s.middlewareOf(lib, recv, ins, 0)...)
 	}
 	hs := s.handlerArgs(rest, false)
+	for i := range hs {
+		hs[i].scope, hs[i].file, hs[i].line = "route", file, line
+	}
 	switch lib.name {
 	case "gin": // handlers...: all but the last are middleware
 		for i := range hs {
@@ -283,6 +343,9 @@ func (s *routeScan) prefixes(v ssa.Value, depth int) []string {
 	switch v := v.(type) {
 	case *ssa.Call:
 		pkg, name, recv, args := calleeOf(v.Common())
+		if lib := libFor(pkg); lib != nil && lib.name == "chi" && (name == "With" || name == "Group") && recv != nil {
+			return s.prefixes(recv, depth+1)
+		}
 		if lib := libFor(pkg); lib != nil && lib.group[name] && recv != nil && len(args) > 0 {
 			seg, ok := constString(args[0])
 			if !ok {
@@ -295,6 +358,9 @@ func (s *routeScan) prefixes(v ssa.Value, depth int) []string {
 			return out
 		}
 		if lib := libFor(pkg); lib != nil {
+			if pre, ok := s.mounted[v]; ok {
+				return pre // chi.NewRouter() mounted on a parent router
+			}
 			return []string{""} // New(), Default(), NewRouter()...
 		}
 		// A module function returning a router: use what it returns.
@@ -357,28 +423,52 @@ func (s *routeScan) prefixes(v ssa.Value, depth int) []string {
 }
 
 // middlewareOf collects middleware registered with Use on a router value and
-// on the routers it was derived from.
-func (s *routeScan) middlewareOf(v ssa.Value, depth int) []routeHandler {
+// on the routers it was derived from, plus the middleware passed when a group
+// was created. before is the call that registers the route (or creates the
+// group, or passes the router to a helper): for routers that copy their chain
+// (gin, echo groups) a Use that runs after it does not apply.
+func (s *routeScan) middlewareOf(lib *routerLib, v ssa.Value, before ssa.CallInstruction, depth int) []routeHandler {
 	if depth > 6 {
 		return nil
 	}
 	var parent []routeHandler
+	scope := "router"
 	switch x := v.(type) {
 	case *ssa.Call:
-		pkg, name, recv, _ := calleeOf(x.Common())
-		if lib := libFor(pkg); lib != nil && lib.group[name] && recv != nil {
-			parent = s.middlewareOf(recv, depth+1)
-		} else if libFor(pkg) == nil {
+		pkg, name, recv, args := calleeOf(x.Common())
+		if l := libFor(pkg); l != nil && l.group[name] && recv != nil {
+			parent = s.middlewareOf(lib, recv, x, depth+1)
+			scope = "group"
+			// Group("/x", mw...) and chi With(mw...) add middleware too.
+			var mws []ssa.Value
+			switch {
+			case l.name == "chi" && name == "With":
+				mws = args
+			case (l.name == "gin" || l.name == "echo") && len(args) > 1:
+				mws = args[1:]
+			}
+			file, line := s.p.site(x.Pos())
+			for _, h := range s.handlerArgs(mws, true) {
+				h.scope, h.file, h.line = "group", file, line
+				parent = append(parent, h)
+			}
+		} else if l != nil {
+			scope = "global" // the router created by New(), Default(), NewRouter()
+			for _, m := range s.mountedOn[x] {
+				parent = append(parent, s.middlewareOf(lib, m.parent, m.ins, depth+1)...)
+				scope = "router" // a mounted sub-router: its Use is not global
+			}
+		} else {
 			for _, r := range s.p.returnedValues(x) {
-				parent = append(parent, s.middlewareOf(r, depth+1)...)
+				parent = append(parent, s.middlewareOf(lib, r, nil, depth+1)...)
 			}
 		}
 	case *ssa.ChangeType:
-		parent = s.middlewareOf(x.X, depth+1)
+		parent = s.middlewareOf(lib, x.X, before, depth+1)
 	case *ssa.MakeInterface:
-		parent = s.middlewareOf(x.X, depth+1)
+		parent = s.middlewareOf(lib, x.X, before, depth+1)
 	case *ssa.FieldAddr:
-		return s.middlewareOf(x.X, depth+1)
+		return s.middlewareOf(lib, x.X, before, depth+1)
 	case *ssa.Parameter: // router received as argument: middleware of every caller's router
 		fn := x.Parent()
 		idx := -1
@@ -394,7 +484,7 @@ func (s *routeScan) middlewareOf(v ssa.Value, depth int) []routeHandler {
 				if sc == nil || unwrap(sc) != fn || idx < 0 || idx >= len(cs.instr.Common().Args) {
 					continue
 				}
-				for _, m := range s.middlewareOf(cs.instr.Common().Args[idx], depth+1) {
+				for _, m := range s.middlewareOf(lib, cs.instr.Common().Args[idx], cs.instr, depth+1) {
 					if m.fn == nil || !seen[m.fn] {
 						if m.fn != nil {
 							seen[m.fn] = true
@@ -406,11 +496,80 @@ func (s *routeScan) middlewareOf(v ssa.Value, depth int) []routeHandler {
 		}
 	}
 	out := append([]routeHandler{}, parent...)
-	for _, m := range s.uses[routerKey(v)] {
+	ordered := lib.ordered == "all" || lib.ordered == "groups" && scope == "group"
+	for _, u := range s.uses[routerKey(v)] {
+		m := u.h
 		m.middleware = true
+		if m.scope == "" {
+			m.scope = scope
+		}
+		if ordered && before != nil {
+			switch order(u.ins, before) {
+			case 1: // Use runs after the route (or group) is created: not applied
+				continue
+			case 0:
+				m.conf = Possible
+				m.note = strings.TrimPrefix(m.note+"; registered with Use on some paths only, before the route", "; ")
+			}
+		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// order reports whether instruction a runs before b (-1), after it (1) or
+// whether that depends on the path taken (0). Instructions of different
+// functions are unordered.
+func order(a, b ssa.Instruction) int {
+	if a.Parent() != b.Parent() {
+		return 0
+	}
+	ba, bb := a.Block(), b.Block()
+	if ba == bb {
+		for _, ins := range ba.Instrs {
+			switch ins {
+			case a:
+				return -1
+			case b:
+				return 1
+			}
+		}
+		return 0
+	}
+	switch {
+	case ba.Dominates(bb):
+		return -1
+	case bb.Dominates(ba):
+		return 1
+	}
+	return 0
+}
+
+// routerValues resolves the router-creating calls (chi.NewRouter(), ...) a
+// value may hold, through module functions that return a router.
+func (p *Program) routerValues(v ssa.Value, depth int) []ssa.Value {
+	if depth > 4 {
+		return nil
+	}
+	switch x := v.(type) {
+	case *ssa.MakeInterface:
+		return p.routerValues(x.X, depth+1)
+	case *ssa.ChangeInterface: // chi.Router passed as http.Handler
+		return p.routerValues(x.X, depth+1)
+	case *ssa.ChangeType:
+		return p.routerValues(x.X, depth+1)
+	case *ssa.Call:
+		pkg, name, recv, _ := calleeOf(x.Common())
+		if lib := libFor(pkg); lib != nil && recv == nil && lib.name == "chi" && strings.HasPrefix(name, "New") {
+			return []ssa.Value{x}
+		}
+		var out []ssa.Value
+		for _, r := range p.returnedValues(x) {
+			out = append(out, p.routerValues(r, depth+1)...)
+		}
+		return out
+	}
+	return nil
 }
 
 // handlerArgs resolves handler arguments, expanding variadic slices.
@@ -628,11 +787,40 @@ func (p *Program) resolveHandlerIn(v ssa.Value, e *env, depth int) routeHandler 
 		}
 		return routeHandler{fn: callee, conf: Confirmed, note: "handler built by " + shortName(callee)}
 	case *ssa.UnOp:
+		// A variable captured by a closure (or whose address is taken)
+		// lives in an Alloc: the handler is what was stored in it, when
+		// that is a single store.
+		if x.Op == token.MUL {
+			addr, outer := x.X, e
+			if y, oe, ok := e.lookup(addr); ok {
+				addr, outer = y, oe
+			}
+			if a, ok := addr.(*ssa.Alloc); ok {
+				if v := singleStore(a); v != nil {
+					return p.resolveHandlerIn(v, outer, depth+1)
+				}
+			}
+		}
 		if name := valueName(x); name != "" {
 			return routeHandler{conf: Unresolved, note: "handler stored in " + name}
 		}
 	}
 	return routeHandler{conf: Unresolved, note: "handler not determinable statically"}
+}
+
+// singleStore returns the value stored into an allocation when it is
+// stored exactly once.
+func singleStore(a *ssa.Alloc) ssa.Value {
+	var v ssa.Value
+	for _, r := range *a.Referrers() {
+		if st, ok := r.(*ssa.Store); ok && st.Addr == a {
+			if v != nil {
+				return nil
+			}
+			v = st.Val
+		}
+	}
+	return v
 }
 
 // routerKey identifies a router value regardless of embedded-field access
@@ -658,6 +846,17 @@ func constString(v ssa.Value) (string, bool) {
 		return constant.StringVal(k.Value), true
 	}
 	return "", false
+}
+
+// constPrefix returns the constant left operand of a string concatenation.
+func constPrefix(v ssa.Value) string {
+	if b, ok := v.(*ssa.BinOp); ok && b.Op == token.ADD {
+		if s, ok := constString(b.X); ok {
+			return s
+		}
+		return constPrefix(b.X)
+	}
+	return ""
 }
 
 func joinPath(a, b string) string {

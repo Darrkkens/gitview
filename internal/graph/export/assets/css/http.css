@@ -1,0 +1,29 @@
+/* HTTP journey: layer strip, request builder, responses. */
+.layerstrip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; pointer-events: auto; align-self: flex-start; }
+.layerstrip[hidden] { display: none; }
+.layerstrip .lyr {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; color: var(--text-2); font-size: var(--fs-xs); cursor: pointer;
+}
+.layerstrip .lyr:hover, .layerstrip .lyr[aria-pressed="true"] { border-color: var(--border-strong); color: var(--text); background: var(--surface-2); }
+.layerstrip .lyr .n { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.layerstrip .arrow { color: var(--text-3); font-size: 11px; }
+.layerstrip .lyr.missing { opacity: 0.45; cursor: default; border-style: dashed; }
+
+.urlbar { display: flex; align-items: center; gap: 6px; padding: 4px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); margin-bottom: 6px; }
+.urlbar input { flex: 1; border: 0; background: none; font-family: var(--font-mono); font-size: 12px; padding: 2px 4px; }
+.urlbar input:focus { box-shadow: none; }
+.urlbar .lbl { font-size: var(--fs-xs); color: var(--text-3); padding-left: 4px; white-space: nowrap; }
+table.grid td.cb { width: 22px; }
+table.grid tr.has-note td { border-bottom: 0; padding-bottom: 0; }
+table.grid tr.note-row td { padding-top: 2px; font-size: var(--fs-xs); }
+textarea.body { width: 100%; min-height: 170px; resize: vertical; font: 12px/1.5 var(--font-mono); background: var(--code-bg); }
+.resp { border: 1px solid var(--border); border-radius: var(--r-md); margin-bottom: 8px; background: var(--surface-2); overflow: hidden; }
+.resp .top { display: flex; align-items: center; gap: 8px; padding: 6px 8px; flex-wrap: wrap; }
+.resp .body { padding: 0 8px 8px; }
+.status { font: 700 11px/18px var(--font-mono); padding: 0 6px; border-radius: var(--r-sm); background: var(--surface-3); }
+.status.s2 { color: var(--c-confirmed); } .status.s3 { color: var(--c-likely); } .status.s4 { color: var(--c-possible); } .status.s5 { color: var(--c-unresolved); } .status.s0 { color: var(--text-3); }
+.flowtree { font: 12px/1.7 var(--font-mono); white-space: pre; overflow-x: auto; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--code-bg); }
+.flowtree div { cursor: pointer; border-radius: 3px; padding: 0 4px; }
+.flowtree div:hover { background: var(--surface-hover); }
+.flowtree .c { color: var(--text-3); }

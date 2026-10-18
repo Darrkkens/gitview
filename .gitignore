@@ -3,3 +3,5 @@ gitview
 *.out
 .env
 .env.*
+# Coverage profiles that tests read as fixtures.
+!**/testdata/**/*.out

@@ -527,6 +527,13 @@ func (a *arch) layerEdges() {
 	})
 }
 
+// Architect classifies a Code Flow index alone, without the rest of the
+// study model: every package with its layer (STATIC or HEURISTIC) and the
+// functions whose layer comes from their own structure (STATIC).
+func Architect(progs []*flow.Program, g *flow.Graph) Architecture {
+	return classify(Inputs{Programs: progs, Graph: g}, newGraph(g)).model()
+}
+
 // model returns the architecture: every package, and the functions whose
 // layer comes from their own structure or that the diff changed.
 func (a *arch) model() Architecture {

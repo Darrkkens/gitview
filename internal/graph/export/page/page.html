@@ -1,0 +1,24 @@
+{{define "page"}}<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{.CSP}}">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>{{.Title}}</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+{{template "header" .}}
+<div class="app" id="app">
+{{template "sidebar" .}}
+{{template "canvas" .}}
+{{template "inspector" .}}
+</div>
+{{template "statusbar" .}}
+{{template "overlays" .}}
+<noscript><p class="noscript">GitView needs JavaScript to draw the architecture. The page runs offline and makes no network request.</p></noscript>
+{{.Scripts}}</body>
+</html>
+{{end}}

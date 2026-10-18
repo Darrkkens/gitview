@@ -1,0 +1,22 @@
+/* Source view with line numbers and Go highlighting. */
+.code-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: var(--fs-xs); color: var(--text-3); }
+.code-head .path { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.code {
+  margin: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--code-bg);
+  font: 12px/1.6 var(--font-mono); overflow: auto; max-height: 62vh; tab-size: 4; -moz-tab-size: 4;
+}
+.code table { border-collapse: collapse; min-width: 100%; }
+.code td { padding: 0; vertical-align: top; }
+.code td.ln { width: 1%; padding: 0 10px 0 8px; text-align: right; color: var(--code-gutter); user-select: none; white-space: nowrap; position: sticky; left: 0; background: var(--code-bg); }
+.code td.src { padding-right: 12px; white-space: pre; color: var(--text); }
+.code tr.hl td { background: var(--code-line-hl); }
+.code tr.hl td.ln { color: var(--text-2); }
+.code tr.target td.ln { box-shadow: inset 2px 0 0 var(--accent); color: var(--text); }
+.tk-kw { color: var(--tok-kw); }
+.tk-type { color: var(--tok-type); }
+.tk-fn { color: var(--tok-fn); }
+.tk-str { color: var(--tok-str); }
+.tk-num { color: var(--tok-num); }
+.tk-com { color: var(--tok-com); font-style: italic; }
+.tk-bi { color: var(--tok-builtin); }
+.tk-p { color: var(--tok-punct); }
