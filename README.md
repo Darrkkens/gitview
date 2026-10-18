@@ -1,4 +1,63 @@
-# GitView
+<p align="center">
+  <img src="docs/assets/gitview-icon.svg" width="96" height="96" alt="GitView logo: three connected nodes">
+</p>
+
+<h1 align="center">GitView</h1>
+
+<p align="center">
+  Git em tempo real no terminal, mapa do repositório Go e <b>CodeAudit</b>: auditoria de segurança local com evidências verificáveis, explicada pelo Gemma no Ollama. O código não sai da máquina.
+</p>
+
+<p align="center">
+  <a href="#codeaudit-in-english-hacktoberfest-2026">CodeAudit (English)</a> ·
+  <a href="#codeaudit-security-journey-s-gitview-audit-modo-security-do-html">CodeAudit</a> ·
+  <a href="#repository-graph-a-gitview-graph">Repository Graph</a> ·
+  <a href="#code-flow-f-gitview-flow-aba-no-html">Code Flow</a> ·
+  <a href="#go-deep-inspector-i-gitview-inspect-aba-no-html">Go Deep Inspector</a>
+</p>
+
+## CodeAudit in English (Hacktoberfest 2026)
+
+**A security review of a Go backend that runs entirely on your laptop.**
+
+CodeAudit reuses GitView's static analysis (call graph, HTTP routes, data flow, SQL operations) to look for injection, authentication, authorization, data exposure, configuration and dependency problems. Each finding is shown as a path, route → middlewares → handler → the line that matters, with the evidence behind every step. When you ask, Gemma running on Ollama explains the finding from that evidence only. Every evidence ID, file, line and symbol the model cites is checked against the analysis, and citations that do not exist are shown as rejected.
+
+**Who it is for:** freelancers and small agencies that ship Go APIs to clients and have to hand over a security review they can defend; consultants auditing client code under NDA, where pasting code into a cloud API is not an option; small teams without an AppSec budget. The deliverable is an offline HTML report with the findings, the evidence and the review decisions with their justifications.
+
+![A SQL injection finding in the Security Journey: the route, the middleware chain and the handler lead to the query, with the evidence in the inspector](docs/images/codeaudit-sqli.png)
+
+```sh
+git clone https://github.com/Darrkkens/gitview && cd gitview && go install .   # Go 1.25
+
+cd ~/your-go-api
+gitview audit scan                        # static analysis, no AI involved
+gitview audit findings
+ollama pull gemma3:4b                     # optional, once: GitView never downloads models
+gitview audit serve                       # Security Journey in the browser, with Gemma and review
+gitview audit export -o security.html     # offline report for the client
+```
+
+To try it without a project of your own, the repository ships a small vulnerable API (and its safe variants) used by the tests:
+
+```sh
+gitview audit scan --module internal/audit/testdata/app
+gitview audit serve --module internal/audit/testdata/app
+```
+
+In the terminal UI, `s` opens CodeAudit and `g` asks Gemma about the selected finding.
+
+![Gemma's explanation of the finding, with the evidence it cited checked against the analysis](docs/images/codeaudit-ai.png)
+
+Design rules:
+
+- **The scanner works without AI.** The model never creates, confirms or closes a finding, and it cannot change a review state; it can only recommend one.
+- **Nothing leaves the machine by default.** Only loopback endpoints are accepted unless you pass `--ai-allow-remote`. Models are never downloaded. Comments and strings of the analysed repository are passed to the model as data, never as instructions, and secrets are redacted from the context.
+- **Uncertainty is stated, not hidden.** An IDOR is never confirmed automatically: it is shown as *Review Required — Authorization Not Established*. A public route is not reported as vulnerable just for being public. A finding that disappeared is not counted as fixed when the newer analysis is incomplete where it was.
+- **Bounded exports.** The offline report embeds only the excerpts it needs, redacted, never whole files.
+
+The rest of this README is in Portuguese; the CodeAudit section below has the full rule list and its limits.
+
+## Uso
 
 Monitor de alterações Git em tempo real no terminal. Cada arquivo modificado pode ser expandido ou recolhido individualmente, e os diffs se atualizam sozinhos. Inclui busca global nos diffs, exportação de relatórios, execução de testes, Code Flow e o Go Deep Inspector, para estudar código Go com evidências verificáveis.
 
@@ -805,3 +864,7 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/pbwire` | Decodificador do formato protobuf (pprof, OTLP) |
 | `collector/`, `collector/pgxtracer` | Módulos opcionais (só biblioteca padrão / pgx) para instrumentar a aplicação |
 | raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance e Repository Graph; CLI `flow`, `inspect`, `runtime` e `graph` |
+
+## Licença
+
+[MIT](LICENSE). O ELK.js incluído em `internal/graph/export/assets/vendor/` mantém a própria licença ([EPL-2.0](internal/graph/export/assets/vendor/LICENSE.elk.md)).
