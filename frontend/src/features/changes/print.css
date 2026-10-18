@@ -1,0 +1,29 @@
+/* Printing a report view (Changes, Tests): while one is open, html has the
+   class gd-printable (usePrintable), and printing shows the view only — the
+   app's header and status bar are hidden and the panes stop clipping, so
+   the whole view flows over the pages. */
+@media print {
+  html.gd-printable,
+  html.gd-printable body,
+  html.gd-printable #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff;
+  }
+  html.gd-printable #root > div {
+    display: block !important;
+    height: auto !important;
+  }
+  html.gd-printable #root > div > header,
+  html.gd-printable #root > div > footer,
+  html.gd-printable .toast {
+    display: none !important;
+  }
+  html.gd-printable #root > div > div,
+  html.gd-printable main {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+}

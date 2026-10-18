@@ -1,6 +1,9 @@
-gitview
+# Binaries built at the root (make build, go build ./cmd/gitview)
+/gitview
 *.test
 *.out
+# air (make watch)
+/tmp/
 .env
 .env.*
 # Coverage profiles that tests read as fixtures.

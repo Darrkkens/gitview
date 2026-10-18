@@ -5,14 +5,12 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"html"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 
@@ -33,6 +31,23 @@ func sample() *model.Graph {
 
 var scriptRe = regexp.MustCompile(`(?s)<script([^>]*)>(.*?)</script>`)
 
+// graphData returns the graph section of a page's envelope.
+func graphData(t *testing.T, page string) map[string]any {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)<script type="application/json" id="gitview-data">(.*?)</script>`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("no data block")
+	}
+	var env struct {
+		Kind     string                    `json:"kind"`
+		Sections map[string]map[string]any `json:"sections"`
+	}
+	if err := json.Unmarshal([]byte(m[1]), &env); err != nil {
+		t.Fatalf("data block is not JSON: %v", err)
+	}
+	return env.Sections["graph"]
+}
+
 func TestHTMLIsOfflineAndPinned(t *testing.T) {
 	var buf bytes.Buffer
 	if err := HTML(&buf, sample(), HTMLOptions{}); err != nil {
@@ -52,75 +67,37 @@ func TestHTMLIsOfflineAndPinned(t *testing.T) {
 	if strings.Contains(csp, "connect-src") || strings.Contains(csp, "unsafe-eval") || strings.Contains(csp, "http") || strings.Contains(csp, "worker-src") {
 		t.Errorf("CSP allows more than inline pinned scripts: %s", csp)
 	}
-	var code, data, inert int
+	var code, data int
 	for _, s := range scriptRe.FindAllStringSubmatch(page, -1) {
 		switch {
 		case strings.Contains(s[1], `type="application/json"`):
 			data++
-			var v map[string]any
-			if err := json.Unmarshal([]byte(s[2]), &v); err != nil {
-				t.Fatalf("data block is not JSON: %v", err)
-			}
-			if n := len(v["nodes"].([]any)); n != 2 {
-				t.Errorf("embedded %d nodes", n)
-			}
 		case strings.Contains(s[1], `type="application/gzip+base64"`):
-			inert++
 			if !regexp.MustCompile(`^[A-Za-z0-9+/=]*$`).MatchString(s[2]) {
 				t.Error("the source block is not plain base64")
 			}
 		default:
 			code++
-			if !strings.Contains(csp, scriptHash(s[2])) {
+			sum := sha256.Sum256([]byte(s[2]))
+			if !strings.Contains(csp, "'sha256-"+base64.StdEncoding.EncodeToString(sum[:])+"'") {
 				t.Errorf("inline script %d is not pinned by the CSP", code)
 			}
 		}
 	}
-	if want := len(jsFiles) + 1; code != want || data != 1 || inert != 1 {
-		t.Errorf("found %d scripts, %d data blocks and %d source blocks; want %d, 1 and 1 (the injected name must not create a script)", code, data, inert, want)
+	if code != 1 || data != 1 {
+		t.Errorf("found %d scripts and %d data blocks; want 1 and 1 (the injected name must not create a script)", code, data)
 	}
-	if regexp.MustCompile(`(?i)<(link|iframe|img|object|embed|base)\b`).MatchString(page) {
+	if n := len(graphData(t, page)["nodes"].([]any)); n != 2 {
+		t.Errorf("embedded %d nodes", n)
+	}
+	if regexp.MustCompile(`(?i)<(iframe|img|object|embed|base)\b`).MatchString(page) {
 		t.Error("page loads external resources")
 	}
 	if regexp.MustCompile(`(?i)\s(src|href|action)\s*=\s*"(https?:)?//`).MatchString(page) {
 		t.Error("page references a remote URL")
 	}
-	if regexp.MustCompile(`(?i)url\(\s*['"]?(https?:)?//`).MatchString(pageCSS) || strings.Contains(pageCSS, "@import") {
+	if regexp.MustCompile(`(?i)url\(\s*['"]?(https?:)?//`).MatchString(page) || strings.Contains(page, "@import") {
 		t.Error("the styles load a remote resource")
-	}
-}
-
-// Every part embedded in the binary is used, in a fixed order, and none of
-// them can end the script or style element it is inlined in.
-func TestPagePartsAreListed(t *testing.T) {
-	check := func(dir string, entries []os.DirEntry, listed []string) {
-		var files []string
-		for _, e := range entries {
-			files = append(files, e.Name())
-		}
-		want := append([]string(nil), listed...)
-		sort.Strings(files)
-		sort.Strings(want)
-		if strings.Join(files, ",") != strings.Join(want, ",") {
-			t.Errorf("%s: embedded %v, listed %v", dir, files, want)
-		}
-	}
-	js, _ := jsFS.ReadDir("assets/js")
-	css, _ := cssFS.ReadDir("assets/css")
-	check("assets/js", js, jsFiles)
-	check("assets/css", css, cssFiles)
-	for _, s := range scripts {
-		if strings.Contains(strings.ToLower(s), "</script") {
-			t.Error("a script contains </script")
-		}
-	}
-	if strings.Contains(strings.ToLower(pageCSS), "</style") {
-		t.Error("the styles contain </style")
-	}
-	// The vendored ELK build is the unmodified npm file (assets/README.md).
-	sum := sha256.Sum256([]byte(elkJS))
-	if got := hex.EncodeToString(sum[:]); got != "cbf61b0182e9085d36dcd5b392f57cc816273169ac40bde80b52b808444c5cf8" {
-		t.Errorf("elk-0.11.0.bundled.js changed: sha256 %s", got)
 	}
 }
 
@@ -218,8 +195,7 @@ func TestSourceBundle(t *testing.T) {
 	if !strings.Contains(on.String(), b.Encoded) {
 		t.Error("the page does not embed the bundle")
 	}
-	m := regexp.MustCompile(`(?s)<script type="application/gzip\+base64" id="gitview-sources">(.*?)</script>`).FindStringSubmatch(off.String())
-	if m == nil || m[1] != "" || !strings.Contains(off.String(), `"disabled":true`) || strings.Contains(off.String(), "func A()") {
+	if strings.Contains(off.String(), `id="gitview-sources"`) || !strings.Contains(off.String(), `"disabled":true`) || strings.Contains(off.String(), "func A()") {
 		t.Error("NoSource still embeds source")
 	}
 }

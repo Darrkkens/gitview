@@ -549,21 +549,26 @@ func TestHTMLEmbedsTheCatalog(t *testing.T) {
 	page := buf.String()
 	start := strings.Index(page, `<script type="application/json" id="gitview-data">`)
 	end := strings.Index(page[start:], "</script>")
-	var data struct {
-		HTTP struct {
-			Routes []struct {
-				Key       string `json:"key"`
-				Responses []struct {
-					Evidence      []map[string]any `json:"evidence"`
-					EvidenceTotal int              `json:"evidenceTotal"`
-				} `json:"responses"`
-			} `json:"routes"`
-		} `json:"http"`
+	var env struct {
+		Sections struct {
+			Graph struct {
+				HTTP struct {
+					Routes []struct {
+						Key       string `json:"key"`
+						Responses []struct {
+							Evidence      []map[string]any `json:"evidence"`
+							EvidenceTotal int              `json:"evidenceTotal"`
+						} `json:"responses"`
+					} `json:"routes"`
+				} `json:"http"`
+			} `json:"graph"`
+		} `json:"sections"`
 	}
 	raw := page[start+len(`<script type="application/json" id="gitview-data">`) : start+end]
-	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
 		t.Fatal(err)
 	}
+	data := env.Sections.Graph
 	if len(data.HTTP.Routes) != len(g.HTTP.Routes) {
 		t.Fatalf("embedded %d routes, want %d", len(data.HTTP.Routes), len(g.HTTP.Routes))
 	}

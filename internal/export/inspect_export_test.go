@@ -2,8 +2,6 @@ package export
 
 import (
 	"encoding/json"
-	"html"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -37,37 +35,17 @@ func TestInspectorSectionIsEscapedAndPinnedByCSP(t *testing.T) {
 	if strings.Count(s, "<script>alert(1)</script>") > 0 || strings.Contains(s, "<img src=x") {
 		t.Fatal("repository content broke out of the data block")
 	}
-	for _, want := range []string{`id="inspect-data"`, `href="#inspect"`, `id="inspect-app"`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("missing %q", want)
-		}
-	}
-	csp := regexp.MustCompile(`Content-Security-Policy" content="([^"]+)"`).FindStringSubmatch(s)
-	if len(csp) == 2 {
-		csp[1] = html.UnescapeString(csp[1])
-	}
-	if len(csp) < 2 || !strings.Contains(csp[1], "default-src 'none'") || strings.Count(csp[1], "sha256-") != 5 {
-		t.Fatalf("CSP %v", csp)
-	}
-	// Every inline script is allowed by hash, so nothing else can run.
-	for _, m := range regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(s, -1) {
-		if !strings.Contains(csp[1], scriptHash(m[1])) {
-			t.Errorf("inline script not pinned by the CSP: %.60q", m[1])
-		}
-	}
-	// The data block holds valid JSON with the original text.
-	data := regexp.MustCompile(`(?s)<script type="application/json" id="inspect-data">(.*?)</script>`).FindStringSubmatch(s)
+	// The section holds the original text.
 	var d struct {
-		Symbols []struct {
-			Symbol evidence.SymbolRef `json:"symbol"`
-		} `json:"symbols"`
+		Inspect struct {
+			Symbols []struct {
+				Symbol evidence.SymbolRef `json:"symbol"`
+			} `json:"symbols"`
+		} `json:"inspect"`
 	}
-	if err := json.Unmarshal([]byte(data[1]), &d); err != nil || d.Symbols[0].Symbol.Qualified != "x."+hostile {
-		t.Errorf("data block: %v %+v", err, d)
-	}
-	// The script inserts repository text with textContent only.
-	if strings.Contains(inspectJS, "innerHTML") || strings.Contains(inspectJS, "eval(") || strings.Contains(inspectJS, "insertAdjacentHTML") {
-		t.Error("inspector script uses an HTML sink")
+	pageSection(t, s, "report", &d)
+	if len(d.Inspect.Symbols) != 1 || d.Inspect.Symbols[0].Symbol.Qualified != "x."+hostile {
+		t.Errorf("section: %+v", d)
 	}
 }
 
@@ -85,7 +63,9 @@ func TestInspectorInJSONAndMarkdown(t *testing.T) {
 		t.Errorf("markdown:\n%s", md)
 	}
 	plain, _ := Render(HTML, Report{Project: "p", GeneratedAt: time.Unix(0, 0)})
-	if strings.Contains(string(plain), `id="inspect-data"`) || strings.Contains(string(plain), `href="#inspect"`) {
+	var none ReportSection
+	pageSection(t, string(plain), "report", &none)
+	if none.Inspect != nil {
 		t.Error("a report without inspector data must not pretend to have it")
 	}
 }

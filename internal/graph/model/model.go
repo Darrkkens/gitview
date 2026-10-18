@@ -117,6 +117,7 @@ type Edge struct {
 // example an audit that marks a path from an HTTP input to a query).
 type Annotation struct {
 	Kind     string              `json:"kind"`
+	Ref      string              `json:"ref,omitempty"` // ID of what it comes from, e.g. a CodeAudit finding
 	Severity string              `json:"severity,omitempty"`
 	Title    string              `json:"title"`
 	Details  string              `json:"details,omitempty"`
