@@ -42,15 +42,17 @@ exemplos:
   gitview graph export --format json --level packages
   gitview graph export --format openapi --output openapi.json
   gitview graph export --format postman --output collection.json
-  gitview graph export --level functions        # visão inicial do HTML
+  gitview graph export --level packages         # HTML: abre com todos os pacotes visíveis
   gitview graph export --include-http=false     # sem o catálogo HTTP
+  gitview graph export --include-source=false   # HTML sem o código-fonte (aba Source vazia)
   gitview graph routes
   gitview graph routes --format json
   gitview graph journey --route "POST /api/clients" --depth 4
   gitview graph stats --module backend
 
 níveis (--level): full, packages, files, functions, types.
-No HTML o nível é só a visão inicial: o arquivo contém o grafo completo.
+No HTML o nível é só a visão inicial do canvas (packages expande os diretórios,
+files expande também os pacotes): o arquivo contém o grafo completo.
 No JSON o nível filtra o dataset (files acrescenta arestas derivadas entre
 arquivos, marcadas como "derived").
 
@@ -69,6 +71,7 @@ type graphFlags struct {
 	overwrite   bool
 	jsonOut     bool
 	includeHTTP bool
+	includeSrc  bool
 	route       string
 	depth       int
 }
@@ -100,10 +103,11 @@ func runGraph(args []string, stdout, stderr io.Writer) int {
 		fs.StringVar(&f.output, "output", "", "arquivo de saída (padrão gitview-graph.html; json, openapi e postman sem --output vão para a saída padrão)")
 		fs.StringVar(&f.output, "o", "", "atalho para --output")
 		fs.StringVar(&f.level, "level", "", "full, packages, files, functions ou types")
-		fs.IntVar(&f.maxNodes, "max-nodes", 5000, "HTML: nós desenhados de uma vez antes de manter só os mais conectados")
-		fs.IntVar(&f.maxEdges, "max-edges", 25000, "HTML: arestas desenhadas de uma vez")
+		fs.IntVar(&f.maxNodes, "max-nodes", 5000, "HTML: elementos que uma expansão pode desenhar; acima disso a página sugere abrir o grupo como escopo")
+		fs.IntVar(&f.maxEdges, "max-edges", 25000, "HTML: mantido por compatibilidade (o canvas agrega as relações por grupo)")
 		fs.BoolVar(&f.overwrite, "overwrite", false, "substitui o arquivo de saída se existir")
 		fs.BoolVar(&f.includeHTTP, "include-http", true, "inclui o catálogo HTTP (rotas e contratos) e o HTTP Explorer")
+		fs.BoolVar(&f.includeSrc, "include-source", true, "HTML: embute os arquivos .go do repositório (compactados) para a aba Source")
 	case "routes":
 		fs.StringVar(&f.format, "format", "text", "text ou json")
 	case "journey":
@@ -187,7 +191,7 @@ func runGraph(args []string, stdout, stderr io.Writer) int {
 	case "postman":
 		err = gexport.Postman(&buf, g)
 	default:
-		err = gexport.HTML(&buf, g, gexport.HTMLOptions{Level: f.level, MaxNodes: f.maxNodes, MaxEdges: f.maxEdges})
+		err = gexport.HTML(&buf, g, gexport.HTMLOptions{Level: f.level, MaxNodes: f.maxNodes, MaxEdges: f.maxEdges, NoSource: !f.includeSrc})
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "gitview graph export:", err)
@@ -262,13 +266,21 @@ func graphModules(dir, module string) (string, []string, error) {
 // analyzeRepoGraph loads the modules (printing progress) and builds the
 // dataset.
 func analyzeRepoGraph(ctx context.Context, dir, module string, progress io.Writer, noHTTP bool) (*gmodel.Graph, error) {
-	root, mods, err := graphModules(dir, module)
+	root, progs, failures, took, err := loadGraphPrograms(ctx, dir, module, progress)
 	if err != nil {
 		return nil, err
 	}
+	return buildRepoGraph(ctx, root, progs, failures, took, noHTTP)
+}
+
+// loadGraphPrograms loads every module of the repository (or one) with
+// Code Flow; modules that fail are listed in failures.
+func loadGraphPrograms(ctx context.Context, dir, module string, progress io.Writer) (root string, progs []*flow.Program, failures []string, took time.Duration, err error) {
+	root, mods, err := graphModules(dir, module)
+	if err != nil {
+		return "", nil, nil, 0, err
+	}
 	start := time.Now()
-	var progs []*flow.Program
-	var failures []string
 	for _, m := range mods {
 		rel, _ := filepath.Rel(root, m)
 		fmt.Fprintf(progress, "analisando %s…", rel)
@@ -276,7 +288,7 @@ func analyzeRepoGraph(ctx context.Context, dir, module string, progress io.Write
 		p, err := flow.Load(ctx, root, m)
 		if ctx.Err() != nil {
 			fmt.Fprintln(progress)
-			return nil, ctx.Err()
+			return "", nil, nil, 0, ctx.Err()
 		}
 		if err != nil {
 			fmt.Fprintln(progress, " falhou:", err)
@@ -286,7 +298,7 @@ func analyzeRepoGraph(ctx context.Context, dir, module string, progress io.Write
 		fmt.Fprintf(progress, " %s\n", time.Since(t).Round(10*time.Millisecond))
 		progs = append(progs, p)
 	}
-	return buildRepoGraph(ctx, root, progs, failures, time.Since(start), noHTTP)
+	return root, progs, failures, time.Since(start), nil
 }
 
 func buildRepoGraph(ctx context.Context, root string, progs []*flow.Program, failures []string, analysis time.Duration, noHTTP bool) (*gmodel.Graph, error) {

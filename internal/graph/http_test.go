@@ -547,7 +547,7 @@ func TestHTMLEmbedsTheCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := buf.String()
-	start := strings.Index(page, `<script type="application/json" id="graph-data">`)
+	start := strings.Index(page, `<script type="application/json" id="gitview-data">`)
 	end := strings.Index(page[start:], "</script>")
 	var data struct {
 		HTTP struct {
@@ -560,7 +560,7 @@ func TestHTMLEmbedsTheCatalog(t *testing.T) {
 			} `json:"routes"`
 		} `json:"http"`
 	}
-	raw := page[start+len(`<script type="application/json" id="graph-data">`) : start+end]
+	raw := page[start+len(`<script type="application/json" id="gitview-data">`) : start+end]
 	if err := json.Unmarshal([]byte(raw), &data); err != nil {
 		t.Fatal(err)
 	}

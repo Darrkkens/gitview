@@ -1,0 +1,15 @@
+{{define "inspector"}}<aside class="inspector" id="inspector" aria-label="Inspector">
+  <div class="resize-handle left" id="inspector-resize" role="separator" aria-orientation="vertical" aria-label="Resize the inspector"></div>
+  <div class="panel-head">
+    <span class="panel-title">Inspector</span>
+    <button type="button" class="icon-btn" id="inspector-collapse" title="Hide the inspector (i)" aria-label="Hide the inspector">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg>
+    </button>
+  </div>
+  <div class="insp-head" id="insp-head"></div>
+  <div class="tabs" role="tablist" id="insp-tabs" aria-label="Inspector sections"></div>
+  <div class="insp-body" id="insp-body" role="tabpanel" tabindex="0"></div>
+</aside>
+<button type="button" class="reopen left" id="sidebar-reopen" title="Show the sidebar (b)" aria-label="Show the sidebar" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg></button>
+<button type="button" class="reopen right" id="inspector-reopen" title="Show the inspector (i)" aria-label="Show the inspector" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg></button>
+{{end}}

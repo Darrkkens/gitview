@@ -28,6 +28,7 @@ const (
 	screenFlow
 	screenRuntime
 	screenGraph
+	screenAudit
 )
 
 type (
@@ -100,6 +101,7 @@ type model struct {
 	insp        *inspUI
 	rt          *runtimeUI
 	graph       *graphUI
+	audit       *auditUI
 	parseCache  *parseCache
 	renderCache map[string]renderEntry
 	delta       *deltaRenderer
@@ -128,6 +130,7 @@ func newModel(repo *Repo, events <-chan struct{}, opt options) *model {
 		insp:        newInspUI(),
 		rt:          newRuntimeUI(),
 		graph:       newGraphUI(),
+		audit:       newAuditUI(),
 		renderCache: map[string]renderEntry{},
 		delta:       newDeltaRenderer(),
 		hasDelta:    hasDelta,
@@ -287,6 +290,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case graphOpenedMsg:
 		if msg.err != nil {
 			m.graph.msg, m.graph.msgErr = "não foi possível abrir o navegador: "+msg.err.Error(), true
+			m.audit.msg, m.audit.msgErr = m.graph.msg, true
+		}
+
+	case auditDoneMsg:
+		m.auditDone(msg)
+
+	case auditAIMsg:
+		m.auditAIDone(msg)
+
+	case auditProbeMsg:
+		st := msg.st
+		m.audit.aiStatus = &st
+
+	case auditWrittenMsg:
+		m.audit.writing = false
+		if msg.err != nil {
+			m.audit.msg, m.audit.msgErr = "falha ao gravar: "+msg.err.Error(), true
+		} else {
+			m.audit.exported, m.audit.msg, m.audit.msgErr = msg.path, "relatório gravado em "+msg.path, false
 		}
 
 	case inspDocMsg:
@@ -318,6 +340,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inspStop()
 			m.rtStopAll()
 			m.graphStop()
+			m.auditStop()
 			return m, tea.Quit
 		}
 		if m.showHelp {
@@ -339,6 +362,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.runtimeKey(msg)
 		case screenGraph:
 			return m, m.graphKey(msg)
+		case screenAudit:
+			return m, m.auditKey(msg)
 		}
 		return m, m.handleKey(msg)
 	}
@@ -399,6 +424,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.inspStop()
 		m.rtStopAll()
 		m.graphStop()
+		m.auditStop()
 		return tea.Quit
 	case "?":
 		m.showHelp = true
@@ -465,6 +491,8 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.openRuntime()
 	case "a":
 		return m.openGraph()
+	case "s":
+		return m.openAudit()
 	case "r":
 		return m.requestRefresh()
 	}
@@ -636,6 +664,8 @@ func (m *model) View() string {
 		body = m.runtimeView()
 	case m.screen == screenGraph:
 		body = m.graphView()
+	case m.screen == screenAudit:
+		body = m.auditView()
 	default:
 		body = m.vp.View()
 	}
@@ -681,6 +711,8 @@ func (m *model) footerView() string {
 		return m.runtimeFooter()
 	case screenGraph:
 		return m.graphFooter()
+	case screenAudit:
+		return m.auditFooter()
 	}
 	if m.err != nil {
 		return " " + stDel.Render(ansiTruncate(m.err.Error(), m.width-2))
@@ -702,6 +734,7 @@ func (m *model) footerView() string {
 		keyHint{"i", "Inspector"},
 		keyHint{"m", "Runtime"},
 		keyHint{"a", "Grafo"},
+		keyHint{"s", "CodeAudit"},
 		keyHint{"x", "Exportar"},
 	)
 	if m.hoff > 0 {

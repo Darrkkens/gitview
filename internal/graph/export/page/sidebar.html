@@ -1,0 +1,17 @@
+{{define "sidebar"}}<aside class="sidebar" id="sidebar" aria-label="Explorer">
+  <div class="panel-head">
+    <span class="panel-title" id="sidebar-title">Explorer</span>
+    <button type="button" class="icon-btn" id="sidebar-collapse" title="Hide the sidebar (b)" aria-label="Hide the sidebar">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+    </button>
+  </div>
+  <div class="sidebar-filter">
+    <input type="search" id="sidebar-filter" placeholder="Filter…" autocomplete="off" spellcheck="false" aria-label="Filter the tree">
+  </div>
+  <div class="sidebar-tools" id="sidebar-tools"></div>
+  <div class="tree" id="tree" role="tree" aria-label="Repository structure" tabindex="0"></div>
+  <div class="routes" id="routes" aria-label="HTTP endpoints" hidden></div>
+  <div class="security" id="security" aria-label="Security findings" hidden></div>
+  <div class="resize-handle right" id="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar"></div>
+</aside>
+{{end}}

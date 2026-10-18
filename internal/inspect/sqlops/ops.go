@@ -120,8 +120,9 @@ type Op struct {
 	Notes    []string           `json:"notes,omitempty"`
 	Deferred bool               `json:"deferred,omitempty"`
 
-	fn    *ssa.Function
-	instr ssa.CallInstruction
+	fn       *ssa.Function
+	instr    ssa.CallInstruction
+	sqlValue ssa.Value
 }
 
 // Tx groups the operations of one transaction started in a function.
@@ -295,6 +296,7 @@ func newOp(p *flow.Program, fn *ssa.Function, cs flow.CallSite, t flow.Callee) *
 			astArg = call.Args[sqlIdx-shift]
 		}
 		op.SQL = resolveSQL(p, fn, c.Args[sqlIdx], astArg, 0)
+		op.sqlValue = c.Args[sqlIdx]
 		op.params(p, fn, c, call, sqlIdx, shift)
 		op.checkPlaceholders()
 	}
@@ -871,6 +873,13 @@ func (pr Param) Value() ssa.Value { return pr.value }
 
 // Function returns the function performing the operation.
 func (op *Op) Function() *ssa.Function { return op.fn }
+
+// SQLValue returns the SSA value of the SQL argument (nil for operations
+// without SQL), for Data Flow.
+func (op *Op) SQLValue() ssa.Value { return op.sqlValue }
+
+// Instr returns the call instruction of the operation.
+func (op *Op) Instr() ssa.CallInstruction { return op.instr }
 
 // Label is a short description: "pgx QueryRow at repository/pg.go:22".
 func (op *Op) Label() string {

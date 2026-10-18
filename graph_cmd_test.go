@@ -73,7 +73,7 @@ func TestGraphCLIHTMLAndOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := string(data)
-	for _, want := range []string{"Content-Security-Policy", "default-src &#39;none&#39;", `id="graph-data"`, `"level":"functions"`} {
+	for _, want := range []string{"Content-Security-Policy", "default-src &#39;none&#39;", `id="gitview-data"`, `id="gitview-sources"`, `"level":"functions"`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("HTML missing %q", want)
 		}

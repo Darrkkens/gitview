@@ -1,15 +1,18 @@
-# Vendored browser libraries
+# Page assets
 
-Embedded into the Repository Graph HTML report so it works offline (no CDN).
-Both files are the unmodified npm builds except for the trailing
-`//# sourceMappingURL=` comment, which was removed so browsers never try to
-load a source map.
+The Repository Graph HTML page is assembled by `../html.go` from:
+
+- `../page/*.html`: html/template partials (header, sidebar, canvas, inspector, overlays, status bar).
+- `css/`: the design system (`tokens.css`) and one stylesheet per component, concatenated in the order of `cssFiles`.
+- `js/`: one module per component, concatenated in the order of `jsFiles`. Each one adds itself to the `GV` namespace and becomes its own inline script, pinned by its SHA-256 in the page's Content-Security-Policy. A test checks that every file is listed.
+- `vendor/`: third-party code, embedded unmodified.
+
+## Vendored library
+
+Embedded so the page works offline (no CDN). The page's CSP (`default-src 'none'`, no `connect-src`, no workers) blocks every network request anyway.
 
 | File | Package | License | SHA-256 of the npm file |
 |---|---|---|---|
-| `sigma-3.0.2.min.js` | `sigma@3.0.2` `dist/sigma.min.js` | MIT (`LICENSE.sigma.txt`) | `be6f790da9c1856765b1c430de3b1aac50433223361870edb3097a9868218a88` |
-| `graphology-0.26.0.umd.min.js` | `graphology@0.26.0` `dist/graphology.umd.min.js` | MIT (`LICENSE.graphology.txt`) | `dc337efa23903f61e064c8e7e7f93a429e6855dccfc2458802b4ed30c621c087` |
+| `vendor/elk-0.11.0.bundled.js` | `elkjs@0.11.0` `lib/elk.bundled.js` | EPL-2.0 (`vendor/LICENSE.elk.md`) | `cbf61b0182e9085d36dcd5b392f57cc816273169ac40bde80b52b808444c5cf8` |
 
-Sigma renders with WebGL. Its image loader contains a `fetch` call that the
-report never uses; the report's Content-Security-Policy (`default-src 'none'`)
-blocks every network request anyway.
+ELK runs in the page's thread through the bundle's built-in fake worker: the page never passes `workerUrl`, so no Worker is created. `TestPagePartsAreListed` checks the hash.
