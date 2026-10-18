@@ -17,7 +17,7 @@ func Auth(c *gin.Context) {
 		c.AbortWithStatus(http.StatusUnauthorized)
 		return
 	}
-	log.Printf("auth token=%s", token)                       // GO-LOG-001: credential in the logs
+	log.Printf("auth token=%s", token)                       // GO-DATA-004: credential in the logs
 	t, _, err := jwt.NewParser().ParseUnverified(token, nil) // GO-AUTHN-003
 	if err != nil || t == nil {
 		c.AbortWithStatus(http.StatusUnauthorized)

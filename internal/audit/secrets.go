@@ -115,7 +115,10 @@ func ruleHardcodedSecrets(s *scanner, r *rule) {
 			if !ok || reported[e.Pos()] || !secretName.MatchString(name) || notASecret.MatchString(name) {
 				return
 			}
-			if len(v) < 8 || looksLikeName(v) || placeholder.MatchString(v) {
+			// Text with spaces describes a credential ("Authorization
+			// header") rather than holding one; known formats are still
+			// reported below by format.
+			if len(v) < 8 || looksLikeName(v) || placeholder.MatchString(v) || strings.ContainsAny(v, " \t\n") {
 				return
 			}
 			for _, f := range secretFormats {

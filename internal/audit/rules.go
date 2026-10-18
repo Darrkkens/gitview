@@ -82,7 +82,7 @@ var catalog = []*rule{
 		Why:         "Secrets in the code reach every copy of the repository and its history, and cannot be rotated without a release.",
 		Remediation: []string{"Read the secret from the environment or a secret manager, and rotate the exposed value.", "Remove it from the history if the repository is shared."},
 		Tests:       []string{"Add a secret scanner (for example gitleaks) to CI and assert this location no longer reports."},
-		Limits:      "Name-based detection is heuristic; the secret itself is never shown in reports or sent to the AI."}, ruleHardcodedSecrets},
+		Limits:      "Name-based detection is heuristic and skips values with spaces (descriptions, not secrets, though a hardcoded passphrase is missed); the secret itself is never shown in reports or sent to the AI."}, ruleHardcodedSecrets},
 	{RuleInfo{ID: "GO-DATA-002", Category: CatSensitiveData, Title: "Internal error details in a response", Severity: SevLow, Basis: "static",
 		Detects:     "Responses whose body includes err.Error() (gin JSON maps, http.Error) with a 5xx status.",
 		Why:         "Database and library errors reveal table names, queries, paths and versions that help an attacker.",
