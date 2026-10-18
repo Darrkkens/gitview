@@ -1,0 +1,22 @@
+mode: set
+example.com/shop/internal/services/pricing_client.go:16.73,18.16 2 0
+example.com/shop/internal/services/pricing_client.go:18.16,20.3 1 0
+example.com/shop/internal/services/pricing_client.go:21.2,22.16 2 0
+example.com/shop/internal/services/pricing_client.go:22.16,24.3 1 0
+example.com/shop/internal/services/pricing_client.go:25.2,26.60 2 0
+example.com/shop/internal/services/rating.go:20.111,22.16 2 1
+example.com/shop/internal/services/rating.go:22.16,24.3 1 0
+example.com/shop/internal/services/rating.go:25.2,25.17 1 0
+example.com/shop/internal/services/rating.go:25.17,27.3 1 0
+example.com/shop/internal/services/rating.go:28.2,29.21 2 0
+example.com/shop/internal/services/rating.go:29.21,31.3 1 0
+example.com/shop/internal/services/rating.go:32.2,32.30 1 0
+example.com/shop/internal/services/rating.go:32.30,34.17 2 0
+example.com/shop/internal/services/rating.go:34.17,36.4 1 0
+example.com/shop/internal/services/rating.go:37.3,37.67 1 0
+example.com/shop/internal/services/rating.go:39.2,39.55 1 0
+example.com/shop/internal/services/rating.go:39.55,41.3 1 0
+example.com/shop/internal/services/rating.go:42.2,42.20 1 0
+example.com/shop/internal/services/rating.go:46.55,48.30 2 1
+example.com/shop/internal/services/rating.go:48.30,50.3 1 1
+example.com/shop/internal/services/rating.go:51.2,51.22 1 1
