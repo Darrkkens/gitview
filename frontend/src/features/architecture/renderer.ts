@@ -1,9 +1,24 @@
 // Canvas renderer. Draws a scene (boxes and edges in world coordinates,
 // computed by the views) with a pan/zoom camera, culling, level of detail
 // and highlight/dim states, plus the minimap. It knows nothing about the
-// dataset: views give it boxes and edges, it reports clicks.
+// dataset: views give it boxes and edges, it reports what the viewer does.
+//
+// Pointer gestures (mouse, pen and touch, through pointer events):
+//   press and release without moving   click (twice quickly: double-click)
+//   drag a card, or a group by its header   move it (with the selection)
+//   drag empty space or a group's body   pan; Shift+drag: select a rectangle
+//   two fingers                          pinch to zoom (and pan)
+//   wheel                                zoom at the pointer
+// A press becomes a drag beyond a few pixels (geometry.ts); a drag never
+// clicks. Moving cards edits the scene in place (edit.ts) and redraws only
+// what changed; the controller is told when the move ends.
 
+import { placeLabel } from '../../lib/edgeLabel'
 import { token } from '../../lib/tokens'
+import { CARD_H, KIND_FONT } from './cards'
+import { SceneEditor } from './edit'
+import { fitZoom as fitZoomOf, isDrag } from './geometry'
+import { bboxOf } from './route'
 import { fit as fitText, font, HEAD_FONT, SUB_FONT, TITLE_FONT, textWidth } from './text'
 import type { Box, EdgeRole, Highlight, Scene, SceneEdge } from './types'
 
@@ -28,23 +43,50 @@ export interface SceneOpts {
   fitOpts?: FitOpts
   animate?: boolean
   anchor?: string
+  /** The editor of the scene (the controller's), so both see the same nesting. */
+  editor?: SceneEditor
+}
+
+export interface PointerMods {
+  shift: boolean
+  /** Ctrl or Cmd: toggles the element in the selection. */
+  toggle: boolean
 }
 
 export interface RendererEvents {
-  box(box: Box, header: boolean, ev: PointerEvent): void
-  edge(e: SceneEdge): void
-  empty(): void
+  box(box: Box, header: boolean, mods: PointerMods): void
+  edge(e: SceneEdge, mods: PointerMods): void
+  empty(mods: PointerMods): void
   dblbox(box: Box, header: boolean): void
+  /** A drag starts on a box: the keys of the boxes to move, or null to pan instead. */
+  dragStart(box: Box, mods: PointerMods): string[] | null
+  /** The moved boxes (topmost), by dx, dy in total. */
+  dragEnd(moved: Box[], dx: number, dy: number): void
+  /** A rectangle was drawn over these boxes. */
+  marquee(keys: string[], additive: boolean): void
+  /** Shift+arrows on the canvas: move the selection. */
+  nudge(dx: number, dy: number): void
 }
 
-const EMPTY: Scene = { boxes: [], edges: [], bounds: { x: 0, y: 0, w: 1, h: 1 } }
+export interface DrawOptions {
+  /** Draw only the selection and what it relates to. */
+  isolate: boolean
+  /** Hide lines that carry only weak relations or type uses. */
+  hideMinor: boolean
+}
+
+const EMPTY: Scene = { boxes: [], edges: [], bounds: { x: 0, y: 0, w: 1, h: 1 }, style: 'orthogonal', prefer: 'v' }
 const DASH: Record<string, number[]> = { likely: [6, 4], possible: [2, 4], unresolved: [5, 4] }
 const reduced = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+const HEADER = 30
+const DBL_MS = 380
 
 interface Tween {
   t0: number
   ms: number
   from: Map<string, { x: number; y: number; w: number; h: number }>
+  /** Boxes that were not drawn before: they fade in. */
+  fresh: Set<string>
 }
 interface CamTween {
   t0: number
@@ -53,6 +95,23 @@ interface CamTween {
   b: { x: number; y: number; z: number }
 }
 
+type Gesture =
+  | {
+      kind: 'press'
+      id: number
+      type: string
+      x: number
+      y: number
+      box: Box | null
+      header: boolean
+      edge: SceneEdge | null
+      mods: PointerMods
+    }
+  | { kind: 'pan'; id: number; x: number; y: number; cx: number; cy: number }
+  | { kind: 'move'; id: number; keys: string[]; wx: number; wy: number; dx: number; dy: number; moved: Box[] }
+  | { kind: 'marquee'; id: number; x0: number; y0: number; x1: number; y1: number; additive: boolean }
+  | { kind: 'pinch'; d0: number; z0: number; wx: number; wy: number }
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D
   private mctx: CanvasRenderingContext2D
@@ -60,24 +119,29 @@ export class Renderer {
   private H = 0
   private dpr = 1
   private scene: Scene = EMPTY
+  private editor: SceneEditor = new SceneEditor(EMPTY)
   private byKey = new Map<string, Box>()
   private edgeByKey = new Map<string, SceneEdge>()
   private cam = { x: 0, y: 0, z: 1 }
   private hl: Highlight | null = null
-  private selected: string | null = null
+  private sel = new Set<string>()
   private hover: string | null = null
   private hoverEdge: string | null = null
   private tween: Tween | null = null
   private camTween: CamTween | null = null
   private dirty = true
   private miniDirty = true
+  private miniAt = 0
   private showMini = true
+  private opts: DrawOptions = { isolate: false, hideMinor: false }
   private raf = 0
   private miniT: { s: number; ox: number; oy: number } | null = null
-  private drag: { x: number; y: number; cx: number; cy: number; moved: boolean } | null = null
+  private gesture: Gesture | null = null
+  private pointers = new Map<number, { x: number; y: number; type: string }>()
+  private lastClick: { t: number; x: number; y: number; key: string } | null = null
   private ro: ResizeObserver | null = null
   private cleanup: (() => void)[] = []
-  readonly stats = { draws: 0, last: 0, max: 0 }
+  readonly stats = { draws: 0, last: 0, max: 0, moves: 0, moveMs: 0, moveMax: 0 }
 
   private canvas: HTMLCanvasElement
   private mini: HTMLCanvasElement
@@ -124,58 +188,41 @@ export class Renderer {
   // ---------- scene ----------
   /**
    * setScene replaces what is drawn. opts.animate tweens boxes that keep
-   * their key from their previous place; opts.fit fits the camera;
-   * opts.anchor keeps that box at the same place on screen.
+   * their key from their previous place (never the ones the viewer placed);
+   * opts.fit fits the camera; opts.anchor keeps that box at the same place
+   * on screen.
    */
   setScene(next: Scene, opts: SceneOpts = {}) {
+    if (this.gesture && this.gesture.kind === 'move') this.gesture = null
     const prev = this.byKey
     const anchorBox = opts.anchor ? prev.get(opts.anchor) : undefined
     const before = anchorBox ? this.screenOfBox(anchorBox) : null
     this.scene = next
+    this.editor = opts.editor && opts.editor.scene === next ? opts.editor : new SceneEditor(next)
     this.byKey = new Map()
     this.edgeByKey = new Map()
-    const tf = TITLE_FONT(),
-      sf = SUB_FONT(),
-      hf = HEAD_FONT()
     for (const b of next.boxes) {
       this.byKey.set(b.key, b)
-      const countW = b.count ? textWidth(b.count, sf) + 10 : 0
-      if (b.kind === 'group') {
-        // header: ■ title  subtitle ……… count
-        b._title = fitText(b.title, hf, Math.max(10, b.w - 36 - countW))
-        const rest = b.w - 36 - countW - textWidth(b._title, hf) - 10
-        b._sub = b.sub && rest > 40 ? fitText(b.sub, sf, rest) : ''
-      } else {
-        const left = 22,
-          right = 10 + (b.chev ? 16 : 0) + countW
-        b._title = fitText(b.title, tf, Math.max(10, b.w - left - right))
-        b._sub = b.sub ? fitText(b.sub, sf, Math.max(10, b.w - left - 10)) : ''
-      }
+      this.fitBox(b)
     }
     for (const e of next.edges) {
       this.edgeByKey.set(e.key, e)
-      let x0 = Infinity,
-        y0 = Infinity,
-        x1 = -Infinity,
-        y1 = -Infinity
-      for (let k = 0; k < e.pts.length; k += 2) {
-        x0 = Math.min(x0, e.pts[k])
-        x1 = Math.max(x1, e.pts[k])
-        y0 = Math.min(y0, e.pts[k + 1])
-        y1 = Math.max(y1, e.pts[k + 1])
-      }
-      e._bb = [x0, y0, x1, y1]
+      if (!e._bb) e._bb = bboxOf(e.pts)
     }
-    if (this.selected && !this.byKey.has(this.selected) && !this.edgeByKey.has(this.selected)) this.selected = null
+    for (const k of Array.from(this.sel)) if (!this.byKey.has(k) && !this.edgeByKey.has(k)) this.sel.delete(k)
     if (this.hover && !this.byKey.has(this.hover)) this.hover = null
     this.hoverEdge = null
     if (opts.animate && prev.size && !reduced()) {
-      const from = new Map<string, { x: number; y: number; w: number; h: number }>()
+      // boxes the viewer placed do not travel: they are where they were put
+      const from = new Map<string, { x: number; y: number; w: number; h: number }>(),
+        fresh = new Set<string>()
       for (const b of next.boxes) {
         const p = prev.get(b.key)
-        if (p) from.set(b.key, { x: p.x, y: p.y, w: p.w, h: p.h })
+        if (!p) fresh.add(b.key)
+        else if (!b.pinned && (p.x !== b.x || p.y !== b.y || p.w !== b.w || p.h !== b.h))
+          from.set(b.key, { x: p.x, y: p.y, w: p.w, h: p.h })
       }
-      this.tween = { t0: performance.now(), ms: 260, from }
+      this.tween = from.size || fresh.size ? { t0: performance.now(), ms: 260, from, fresh } : null
     } else this.tween = null
     if (opts.fit) this.fit(false, opts.fitOpts)
     else if (before && opts.anchor) {
@@ -187,6 +234,28 @@ export class Renderer {
     }
     this.dirty = this.miniDirty = true
     this.schedule()
+  }
+
+  /** fitBox fits the text of a box to its width. */
+  private fitBox(b: Box) {
+    const sf = SUB_FONT()
+    const countW = b.count ? textWidth(b.count, sf) + 10 : 0
+    if (b.kind === 'group') {
+      const hf = HEAD_FONT()
+      const lock = b.locked ? 16 : 0
+      // header: ■ title  subtitle ……… count
+      b._title = fitText(b.title, hf, Math.max(10, b.w - 36 - countW - lock))
+      const rest = b.w - 36 - countW - lock - textWidth(b._title, hf) - 10
+      b._sub = b.sub && rest > 40 ? fitText(b.sub, sf, rest) : ''
+      return
+    }
+    const left = 14,
+      right = 10 + (b.chev ? 16 : 0) + countW
+    b._title = fitText(b.title, TITLE_FONT(), Math.max(10, b.w - left - right))
+    b._sub = b.sub ? fitText(b.sub, sf, Math.max(10, b.w - left - 10)) : ''
+    if (b.kindLabel) b._kind = fitText(b.kindLabel, KIND_FONT(), Math.max(10, b.w - left - 10 - (b.locked ? 16 : 0)))
+    if (b.stats) b._stats = fitText(b.stats, sf, Math.max(10, b.w - left - 10))
+    if (b.deps) b._deps = fitText(b.deps, sf, Math.max(10, b.w - left - 10))
   }
 
   private screenOfBox(b: Box) {
@@ -202,15 +271,40 @@ export class Renderer {
   edge(key: string) {
     return this.edgeByKey.get(key)
   }
+  sceneEditor() {
+    return this.editor
+  }
+
+  // ---------- editing ----------
+  /**
+   * moveBoxes moves boxes by their own deltas (align, distribute, nudge)
+   * and returns the boxes moved.
+   */
+  moveBoxes(list: { key: string; dx: number; dy: number }[]): Box[] {
+    const out: Box[] = []
+    for (const m of list) out.push(...this.editor.move([m.key], m.dx, m.dy))
+    this.afterEdit()
+    return out
+  }
+  private afterEdit() {
+    for (const b of this.scene.boxes) if (b.kind === 'group') this.fitBox(b)
+    this.editor.bounds()
+    this.dirty = this.miniDirty = true
+    this.schedule()
+  }
+  /** refresh redraws after the boxes' flags changed (locked, pinned). */
+  refresh() {
+    for (const b of this.scene.boxes) this.fitBox(b)
+    this.dirty = this.miniDirty = true
+    this.schedule()
+  }
 
   // ---------- camera ----------
   private clampZ(z: number) {
     return Math.max(0.03, Math.min(z, 3))
   }
   private fitZoom(bb: { w: number; h: number }, pad = 48) {
-    return this.clampZ(
-      Math.min((this.W - pad * 2) / Math.max(bb.w, 1), (this.H - pad * 2 - 30) / Math.max(bb.h, 1), 1.25),
-    )
+    return this.clampZ(fitZoomOf(bb, { w: this.W, h: this.H - 30 }, pad, 1.25))
   }
   private animateTo(x: number, y: number, z: number, animate?: boolean) {
     if (animate === false || reduced()) {
@@ -242,10 +336,9 @@ export class Renderer {
     // the view's chips cover the top of the stage: leave them some room
     this.animateTo(bb.x + bb.w / 2, bb.y + bb.h / 2 - 12 / z, z, animate)
   }
-  /** reveal brings boxes into view, zooming in only as far as needed. */
-  reveal(keys: string[], animate?: boolean) {
+  private boundsOf(keys: string[]) {
     const bs = keys.map((k) => this.byKey.get(k)).filter((b): b is Box => !!b)
-    if (!bs.length) return
+    if (!bs.length) return null
     let x0 = Infinity,
       y0 = Infinity,
       x1 = -Infinity,
@@ -256,12 +349,23 @@ export class Renderer {
       x1 = Math.max(x1, b.x + b.w)
       y1 = Math.max(y1, b.y + b.h)
     })
-    const bb = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+  }
+  /** reveal brings boxes into view, zooming in only as far as needed. */
+  reveal(keys: string[], animate?: boolean) {
+    const bb = this.boundsOf(keys)
+    if (!bb) return
     let z = this.cam.z
     const need = this.fitZoom(bb, 80)
     if (z > need) z = need
     if (z < 0.55 && need >= 0.55) z = Math.min(need, 0.9)
     this.animateTo(bb.x + bb.w / 2, bb.y + bb.h / 2, z, animate)
+  }
+  /** fitKeys fits boxes in the view (the selection). */
+  fitKeys(keys: string[], animate?: boolean) {
+    const bb = this.boundsOf(keys)
+    if (!bb) return
+    this.animateTo(bb.x + bb.w / 2, bb.y + bb.h / 2, this.fitZoom(bb, 80), animate)
   }
   zoomBy(f: number, sx?: number, sy?: number) {
     const z = this.clampZ(this.cam.z * f)
@@ -288,6 +392,21 @@ export class Renderer {
   zoom() {
     return this.cam.z
   }
+  /** screenRect: where a box is on the page (client coordinates), for tests and tooltips. */
+  screenRect(key: string): { x: number; y: number; w: number; h: number } | null {
+    const b = this.byKey.get(key)
+    if (!b) return null
+    const r = this.canvas.getBoundingClientRect()
+    return {
+      x: r.left + (b.x - this.cam.x) * this.cam.z + this.W / 2,
+      y: r.top + (b.y - this.cam.y) * this.cam.z + this.H / 2,
+      w: b.w * this.cam.z,
+      h: b.h * this.cam.z,
+    }
+  }
+  camera() {
+    return { ...this.cam }
+  }
 
   // ---------- state from the view ----------
   setHighlight(h: Highlight | null) {
@@ -295,8 +414,9 @@ export class Renderer {
     this.dirty = this.miniDirty = true
     this.schedule()
   }
-  setSelected(key: string | null) {
-    this.selected = key
+  /** setSelected: the selected boxes (and/or the selected line). */
+  setSelected(keys: Iterable<string>) {
+    this.sel = new Set(keys)
     this.dirty = this.miniDirty = true
     this.schedule()
   }
@@ -305,10 +425,29 @@ export class Renderer {
     this.miniDirty = true
     this.schedule()
   }
+  setOptions(o: Partial<DrawOptions>) {
+    this.opts = { ...this.opts, ...o }
+    this.dirty = this.miniDirty = true
+    this.schedule()
+  }
   /** redraw after a theme change. */
   redraw() {
     this.dirty = this.miniDirty = true
     this.schedule()
+  }
+
+  // ---------- visibility ----------
+  /** isolated: hidden by "only related" (not drawn, not picked). */
+  private hiddenBox(b: Box) {
+    const hl = this.hl
+    if (!this.opts.isolate || !hl) return false
+    return !hl.boxes.has(b.key) && !(b.kind === 'group' && hl.keep.has(b.key)) && !this.sel.has(b.key)
+  }
+  private hiddenEdge(e: SceneEdge) {
+    const role = this.hl ? this.hl.edges.get(e.key) : undefined
+    if (this.opts.isolate && this.hl && !role && !this.sel.has(e.key)) return true
+    if (this.opts.hideMinor && e.minor && !role && !this.sel.has(e.key) && this.hoverEdge !== e.key) return true
+    return false
   }
 
   // ---------- drawing ----------
@@ -341,12 +480,15 @@ export class Renderer {
       this.stats.last = performance.now() - t0
       this.stats.max = Math.max(this.stats.max, this.stats.last)
     }
-    if (this.miniDirty && this.showMini) {
+    // while cards move, the minimap follows a few times a second
+    const moving = this.gesture?.kind === 'move'
+    if (this.miniDirty && this.showMini && (!moving || now - this.miniAt > 120)) {
       this.drawMini()
       this.miniDirty = false
+      this.miniAt = now
     }
     if (this.tween && tp >= 1) this.tween = null
-    if (this.camTween || this.tween) this.schedule()
+    if (this.camTween || this.tween || (moving && this.miniDirty)) this.schedule()
   }
 
   private geom(b: Box, tp: number) {
@@ -370,7 +512,7 @@ export class Renderer {
   }
   private boxAlpha(b: Box) {
     const hl = this.hl
-    if (!hl) return 1
+    if (!hl || this.sel.has(b.key)) return 1
     if (hl.boxes.has(b.key)) return 1
     if (b.kind === 'group' && hl.keep.has(b.key)) return 1
     return Number(C('dim-alpha')) || 0.16
@@ -394,18 +536,21 @@ export class Renderer {
     const settled = !this.tween || tp >= 1
     const scene = this.scene
     const late: [string, { x: number; y: number; w: number; h: number }, number, number, boolean, number][] = []
+    // what edge labels must not cover: the cards and the groups' headers in view
+    const covered: number[][] = []
 
     // groups, outer first
     for (const b of scene.boxes) {
       if (b.kind !== 'group') continue
       const g = this.geom(b, tp)
-      if (!inView(g.x, g.y, g.w, g.h)) continue
+      if (!inView(g.x, g.y, g.w, g.h) || this.hiddenBox(b)) continue
+      const sel = this.sel.has(b.key)
       ctx.globalAlpha = this.boxAlpha(b)
       this.rr(ctx, g.x, g.y, g.w, g.h, 8)
       ctx.fillStyle = C('group-fill')
       ctx.fill()
-      ctx.lineWidth = (b.key === this.selected ? 2 : 1) * px
-      ctx.strokeStyle = b.key === this.selected ? C('accent') : b.scope ? C('border-strong') : C('group-border')
+      ctx.lineWidth = (sel ? 2 : 1) * px
+      ctx.strokeStyle = sel ? C('accent') : b.scope ? C('border-strong') : C('group-border')
       if (b.muted) ctx.setLineDash([4 * px, 3 * px])
       ctx.stroke()
       ctx.setLineDash([])
@@ -414,8 +559,9 @@ export class Renderer {
       this.rr(ctx, g.x, g.y, g.w, g.h, 8)
       ctx.clip()
       ctx.fillStyle = C('group-head')
-      ctx.fillRect(g.x, g.y, g.w, 30)
+      ctx.fillRect(g.x, g.y, g.w, HEADER)
       ctx.restore()
+      covered.push([g.x, g.y, g.x + g.w, g.y + HEADER])
       ctx.fillStyle = C(b.color)
       ctx.fillRect(g.x + 10, g.y + 11, 8, 8)
       if (showText && settled) {
@@ -436,9 +582,10 @@ export class Renderer {
           ctx.fillText(b.count, g.x + g.w - 12, g.y + 15.5)
           ctx.textAlign = 'left'
         }
+        if (b.locked && showSub) this.lockIcon(g.x + g.w - 18, g.y + 9, px)
       }
       if (!showText && settled) late.push([b.title, g, 11, 600, true, g.w * g.h * 4])
-      if (b.key === this.hover && b.key !== this.selected) {
+      if (b.key === this.hover && !sel) {
         this.rr(ctx, g.x, g.y, g.w, g.h, 8)
         ctx.lineWidth = px
         ctx.strokeStyle = C('edge-strong')
@@ -458,10 +605,12 @@ export class Renderer {
         for (const e of scene.edges) {
           const role = this.hl ? this.hl.edges.get(e.key) : undefined
           const isHover = hovering(e)
+          const isSel = this.sel.has(e.key)
           // branches (inside a box, towards a bundled trunk) only show on demand
-          if (e.branch && !role && !isHover && e.key !== this.selected) continue
-          const strong = !!role || e.key === this.selected || isHover
+          if (e.branch && !role && !isHover && !isSel) continue
+          const strong = !!role || isSel || isHover
           if (strongPass !== strong) continue
+          if (this.hiddenEdge(e)) continue
           const bb = e._bb!
           if (!inView(bb[0], bb[1], bb[2] - bb[0] + 1, bb[3] - bb[1] + 1)) continue
           this.drawEdge(e, role, isHover, px, edgeAlpha)
@@ -475,9 +624,10 @@ export class Renderer {
     for (const b of scene.boxes) {
       if (b.kind === 'group') continue
       const g = this.geom(b, tp)
-      if (!inView(g.x, g.y, g.w, g.h)) continue
-      ctx.globalAlpha = this.boxAlpha(b) * (this.tween && !this.tween.from.has(b.key) && tp < 1 ? tp : 1)
+      if (!inView(g.x, g.y, g.w, g.h) || this.hiddenBox(b)) continue
+      ctx.globalAlpha = this.boxAlpha(b) * (this.tween && this.tween.fresh.has(b.key) && tp < 1 ? tp : 1)
       this.drawNode(b, g, px, showText, showSub)
+      covered.push([g.x, g.y, g.x + g.w, g.y + g.h])
       if (!showText && settled) late.push([b.title, g, 10, 500, false, g.w * g.h])
     }
     // zoomed-out names last, larger boxes first, never over each other
@@ -492,8 +642,8 @@ export class Renderer {
       const taken: number[][] = []
       const want = (e: SceneEdge) => {
         const role = this.hl ? this.hl.edges.get(e.key) : undefined
-        if (!e.label || e.branch) return 0
-        if (e.key === this.selected || this.hoverEdge === e.key) return 3
+        if (!e.label || e.branch || this.hiddenEdge(e)) return 0
+        if (this.sel.has(e.key) || this.hoverEdge === e.key) return 3
         const h = this.hover
         if (h && (e.s === h || e.t === h || e.units?.has(h))) return 2
         return (role === 'out' || role === 'in') && (e.n > 1 || Object.keys(e.agg.types).length > 1) ? 1 : 0
@@ -502,7 +652,22 @@ export class Renderer {
         .map((e) => [want(e), e] as const)
         .filter((x) => x[0])
         .sort((a, b) => b[0] - a[0])
-        .forEach(([, e]) => this.drawEdgeLabel(e, px, taken))
+        .forEach(([, e]) => this.drawEdgeLabel(e, px, covered, taken))
+    }
+
+    // the rectangle being drawn
+    const g = this.gesture
+    if (g && g.kind === 'marquee') {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      const x = Math.min(g.x0, g.x1),
+        y = Math.min(g.y0, g.y1)
+      ctx.fillStyle = C('accent-weak')
+      ctx.fillRect(x, y, Math.abs(g.x1 - g.x0), Math.abs(g.y1 - g.y0))
+      ctx.strokeStyle = C('accent')
+      ctx.lineWidth = 1
+      ctx.setLineDash([4, 3])
+      ctx.strokeRect(x + 0.5, y + 0.5, Math.abs(g.x1 - g.x0), Math.abs(g.y1 - g.y0))
+      ctx.setLineDash([])
     }
   }
 
@@ -550,6 +715,21 @@ export class Renderer {
     }
   }
 
+  /** lockIcon: a small padlock (top-left corner at x, y; 10×12). */
+  private lockIcon(x: number, y: number, px: number) {
+    const ctx = this.ctx
+    ctx.strokeStyle = C('text-3')
+    ctx.fillStyle = C('text-3')
+    ctx.lineWidth = 1.3 * px
+    ctx.beginPath()
+    ctx.moveTo(x + 2.5, y + 5)
+    ctx.lineTo(x + 2.5, y + 3.2)
+    ctx.arc(x + 5, y + 3.2, 2.5, Math.PI, 0)
+    ctx.lineTo(x + 7.5, y + 5)
+    ctx.stroke()
+    ctx.fillRect(x + 1, y + 5, 8, 6)
+  }
+
   private drawNode(
     b: Box,
     g: { x: number; y: number; w: number; h: number },
@@ -559,7 +739,7 @@ export class Renderer {
   ) {
     const ctx = this.ctx
     const role = this.hl?.boxes.get(b.key)
-    const sel = b.key === this.selected
+    const sel = this.sel.has(b.key)
     const ghost = b.kind === 'context' || b.kind === 'more'
     this.rr(ctx, g.x, g.y, g.w, g.h, 6)
     ctx.fillStyle = ghost ? C('context-fill') : b.key === this.hover ? C('node-fill-hover') : C('node-fill')
@@ -589,9 +769,28 @@ export class Renderer {
       ctx.restore()
     }
     if (!showText) return
-    const twoLines = showSub && !!b._sub && g.h >= 34
     const tx = g.x + 12
     ctx.textBaseline = 'middle'
+    if (b.kindLabel && showSub && g.h >= CARD_H.symbol - 1) {
+      // KIND / name / statistics / dependencies
+      ctx.font = KIND_FONT()
+      ctx.fillStyle = C('text-3')
+      ctx.fillText(b._kind ?? b.kindLabel, tx, g.y + 14)
+      if (b.locked) this.lockIcon(g.x + g.w - 18, g.y + 8, px)
+      ctx.font = TITLE_FONT()
+      ctx.fillStyle = ghost ? C('text-2') : C('text')
+      ctx.fillText(b._title ?? b.title, tx, g.y + 30)
+      ctx.font = SUB_FONT()
+      ctx.fillStyle = C('text-2')
+      if (b._stats) ctx.fillText(b._stats, tx, g.y + 45.5)
+      if (b._deps && g.h >= CARD_H.container - 1) {
+        ctx.fillStyle = C('text-3')
+        ctx.fillText(b._deps, tx, g.y + 59.5)
+      }
+      if (b.chev) this.chevron(b.chev, g.x + g.w - 14, g.y + 30, px)
+      return
+    }
+    const twoLines = showSub && !!b._sub && g.h >= 34 && !b.kindLabel
     ctx.font = TITLE_FONT()
     ctx.fillStyle = ghost ? C('text-2') : C('text')
     ctx.fillText(b._title ?? b.title, tx, twoLines ? g.y + g.h / 2 - 7 : g.y + g.h / 2 + 0.5)
@@ -602,21 +801,7 @@ export class Renderer {
     }
     let rx = g.x + g.w - 10
     if (b.chev) {
-      ctx.strokeStyle = C('text-3')
-      ctx.lineWidth = 1.4 * px
-      ctx.beginPath()
-      const cx = rx - 4,
-        cy = g.y + g.h / 2
-      if (b.chev === 'closed') {
-        ctx.moveTo(cx - 2, cy - 4)
-        ctx.lineTo(cx + 2, cy)
-        ctx.lineTo(cx - 2, cy + 4)
-      } else {
-        ctx.moveTo(cx - 4, cy - 2)
-        ctx.lineTo(cx, cy + 2)
-        ctx.lineTo(cx + 4, cy - 2)
-      }
-      ctx.stroke()
+      this.chevron(b.chev, rx - 4, g.y + g.h / 2, px)
       rx -= 16
     }
     if (b.count) {
@@ -628,17 +813,35 @@ export class Renderer {
     }
   }
 
+  private chevron(dir: 'open' | 'closed', cx: number, cy: number, px: number) {
+    const ctx = this.ctx
+    ctx.strokeStyle = C('text-3')
+    ctx.lineWidth = 1.4 * px
+    ctx.beginPath()
+    if (dir === 'closed') {
+      ctx.moveTo(cx - 2, cy - 4)
+      ctx.lineTo(cx + 2, cy)
+      ctx.lineTo(cx - 2, cy + 4)
+    } else {
+      ctx.moveTo(cx - 4, cy - 2)
+      ctx.lineTo(cx, cy + 2)
+      ctx.lineTo(cx + 4, cy - 2)
+    }
+    ctx.stroke()
+  }
+
   private drawEdge(e: SceneEdge, role: EdgeRole | undefined, isHover: boolean, px: number, alpha: number) {
     const ctx = this.ctx
     const p = e.pts
     if (p.length < 4) return
     const far = role === 'out2' || role === 'in2'
+    const isSel = this.sel.has(e.key)
     const color =
       role === 'out' || role === 'out2'
         ? C('hl-out')
         : role === 'in' || role === 'in2'
           ? C('hl-in')
-          : e.key === this.selected
+          : isSel
             ? C('accent')
             : e.conf === 'unresolved'
               ? C('c-unresolved')
@@ -646,31 +849,37 @@ export class Renderer {
                 ? C('edge-strong')
                 : C('edge')
     const width =
-      (1 +
-        Math.min(Math.log2(1 + (e.n || 1)), 3) * 0.45 +
-        ((role && !far) || isHover || e.key === this.selected ? 0.7 : 0)) *
-      px
+      (1 + Math.min(Math.log2(1 + (e.n || 1)), 3) * 0.45 + ((role && !far) || isHover || isSel ? 0.7 : 0)) * px
     ctx.globalAlpha =
-      alpha *
-      (this.hl && !role && e.key !== this.selected ? Number(C('dim-alpha')) || 0.16 : far && !isHover ? 0.45 : 1)
+      alpha * (this.hl && !role && !isSel ? Number(C('dim-alpha')) || 0.16 : far && !isHover ? 0.45 : 1)
     ctx.strokeStyle = color
     ctx.fillStyle = color
     ctx.lineWidth = width
     const dash = DASH[e.conf]
     ctx.setLineDash(dash ? dash.map((d) => d * px) : [])
-    ctx.beginPath()
-    ctx.moveTo(p[0], p[1])
-    const r = 6
-    for (let k = 2; k < p.length - 2; k += 2) ctx.arcTo(p[k], p[k + 1], p[k + 2], p[k + 3], r)
-    // stop the line at the arrow's base
-    const ex = p[p.length - 2],
-      ey = p[p.length - 1],
-      sx = p[p.length - 4],
-      sy = p[p.length - 3]
+    // the arrow points along the end of the line (over a few pixels: curves are sampled)
+    const n = p.length
+    const ex = p[n - 2],
+      ey = p[n - 1]
+    let k = n - 4,
+      sx = p[k],
+      sy = p[k + 1]
+    while (k > 0 && Math.hypot(ex - sx, ey - sy) < 8 * px) {
+      k -= 2
+      sx = p[k]
+      sy = p[k + 1]
+    }
     const len = Math.hypot(ex - sx, ey - sy) || 1
     const ah = Math.min(8 * px, len * 0.6),
       ux = (ex - sx) / len,
       uy = (ey - sy) / len
+    ctx.beginPath()
+    ctx.moveTo(p[0], p[1])
+    if (this.scene.style === 'orthogonal') {
+      const r = 6
+      for (let j = 2; j < n - 2; j += 2) ctx.arcTo(p[j], p[j + 1], p[j + 2], p[j + 3], r)
+    } else for (let j = 2; j < n - 2; j += 2) ctx.lineTo(p[j], p[j + 1])
+    // stop the line at the arrow's base
     ctx.lineTo(ex - ux * ah * 0.8, ey - uy * ah * 0.8)
     ctx.stroke()
     ctx.setLineDash([])
@@ -683,16 +892,15 @@ export class Renderer {
     ctx.globalAlpha = 1
   }
 
-  private drawEdgeLabel(e: SceneEdge, px: number, taken: number[][]) {
+  private drawEdgeLabel(e: SceneEdge, px: number, covered: number[][], taken: number[][]) {
     const ctx = this.ctx
-    const [mx, my] = midpoint(e.pts)
     const f = font(500, 10.5)
     ctx.font = f
     const label = e.label ?? ''
     const w = textWidth(label, f) + 10
-    const r = [mx - w / 2 - 2, my - 10, mx + w / 2 + 2, my + 10]
-    if (taken.some((q) => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) return
-    taken.push(r)
+    const at = placeLabel(e.pts, w, 16, covered, taken)
+    if (!at) return
+    const [mx, my] = at
     this.rr(ctx, mx - w / 2, my - 8, w, 16, 8)
     ctx.fillStyle = C('surface-1')
     ctx.fill()
@@ -721,15 +929,15 @@ export class Renderer {
       oy = (mh - bb.h * s) / 2 - bb.y * s
     this.miniT = { s, ox, oy }
     for (const b of scene.boxes) {
-      if (b.kind !== 'group') continue
-      mctx.strokeStyle = C('group-border')
+      if (b.kind !== 'group' || this.hiddenBox(b)) continue
+      mctx.strokeStyle = this.sel.has(b.key) ? C('accent') : C('group-border')
       mctx.lineWidth = dpr
       mctx.strokeRect(b.x * s + ox, b.y * s + oy, Math.max(1, b.w * s), Math.max(1, b.h * s))
     }
     for (const b of scene.boxes) {
-      if (b.kind === 'group') continue
-      mctx.globalAlpha = this.hl && !this.hl.boxes.has(b.key) ? 0.25 : 0.85
-      mctx.fillStyle = b.key === this.selected ? C('accent') : C(b.color)
+      if (b.kind === 'group' || this.hiddenBox(b)) continue
+      mctx.globalAlpha = this.hl && !this.hl.boxes.has(b.key) && !this.sel.has(b.key) ? 0.25 : 0.85
+      mctx.fillStyle = this.sel.has(b.key) ? C('accent') : C(b.color)
       mctx.fillRect(b.x * s + ox, b.y * s + oy, Math.max(1.5, b.w * s), Math.max(1.5, b.h * s))
     }
     mctx.globalAlpha = 1
@@ -762,19 +970,20 @@ export class Renderer {
     const boxes = this.scene.boxes
     for (let k = boxes.length - 1; k >= 0; k--) {
       const b = boxes[k]
-      if (b.kind === 'group') continue
+      if (b.kind === 'group' || this.hiddenBox(b)) continue
       if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) return b
     }
     let best: Box | null = null
     for (const b of boxes) {
-      if (b.kind !== 'group') continue
+      if (b.kind !== 'group' || this.hiddenBox(b)) continue
       if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h && (!best || b.depth >= best.depth)) best = b
     }
     return best
   }
+  /** inHeader: on a group's header, which keeps a grabbable height when zoomed out (its name tag). */
   private inHeader(b: Box, sx: number, sy: number) {
     const p = this.toWorld(sx, sy)
-    return b.kind === 'group' && p.y - b.y <= 30
+    return b.kind === 'group' && p.y - b.y <= Math.min(Math.max(HEADER, 22 / this.cam.z), b.h / 2)
   }
   private edgeAt(sx: number, sy: number): SceneEdge | null {
     const p = this.toWorld(sx, sy),
@@ -783,7 +992,8 @@ export class Renderer {
       bd = tol
     for (const e of this.scene.edges) {
       // branches are hidden until asked for: they cannot be picked
-      if (e.branch && !(this.hl?.edges.has(e.key) || e.key === this.selected)) continue
+      if (e.branch && !(this.hl?.edges.has(e.key) || this.sel.has(e.key))) continue
+      if (this.hiddenEdge(e)) continue
       const bb = e._bb!
       if (p.x < bb[0] - tol || p.x > bb[2] + tol || p.y < bb[1] - tol || p.y > bb[3] + tol) continue
       for (let k = 0; k < e.pts.length - 2; k += 2) {
@@ -796,12 +1006,63 @@ export class Renderer {
     }
     return best
   }
+  /** boxesIn: the topmost boxes drawn entirely inside a screen rectangle. */
+  private boxesIn(x0: number, y0: number, x1: number, y1: number): string[] {
+    const a = this.toWorld(Math.min(x0, x1), Math.min(y0, y1)),
+      b = this.toWorld(Math.max(x0, x1), Math.max(y0, y1))
+    const inside = this.scene.boxes.filter(
+      (q) => !this.hiddenBox(q) && q.x >= a.x && q.y >= a.y && q.x + q.w <= b.x && q.y + q.h <= b.y,
+    )
+    const set = new Set(inside.map((q) => q.key))
+    const nested = (q: Box) => {
+      for (let p = q.parent; p; p = this.byKey.get(p)?.parent) if (set.has(p)) return true
+      return false
+    }
+    return inside.filter((q) => !nested(q)).map((q) => q.key)
+  }
 
   // ---------- input ----------
   private local(ev: { clientX: number; clientY: number }) {
     const r = this.canvas.getBoundingClientRect()
     return [ev.clientX - r.left, ev.clientY - r.top] as const
   }
+  private modsOf(ev: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): PointerMods {
+    return { shift: ev.shiftKey, toggle: ev.ctrlKey || ev.metaKey }
+  }
+  private setCursor(c: string) {
+    if (this.canvas.style.cursor !== c) this.canvas.style.cursor = c
+  }
+  private hoverAt(sx: number, sy: number) {
+    const b = this.boxAt(sx, sy)
+    const e = b && b.kind !== 'group' ? null : this.edgeAt(sx, sy)
+    const hk = b && b.kind !== 'group' ? b.key : b && this.inHeader(b, sx, sy) ? b.key : null
+    const ek = e ? e.key : null
+    if (hk !== this.hover || ek !== this.hoverEdge) {
+      this.hover = hk
+      this.hoverEdge = hk ? null : ek
+      const he = this.hoverEdge ? this.edgeByKey.get(this.hoverEdge) : undefined
+      const hb = this.hover ? this.byKey.get(this.hover) : undefined
+      this.canvas.title = he?.label ? he.label : hb?.tip ? hb.tip + (hb.locked ? ' · locked' : '') : ''
+      this.dirty = true
+      this.schedule()
+    }
+    this.setCursor(this.hover || this.hoverEdge ? 'pointer' : '')
+  }
+  private startPinch() {
+    const ps = Array.from(this.pointers.values())
+    if (ps.length < 2) return
+    const [a, b] = ps
+    const r = this.canvas.getBoundingClientRect()
+    const mx = (a.x + b.x) / 2 - r.left,
+      my = (a.y + b.y) / 2 - r.top
+    const w = this.toWorld(mx, my)
+    this.gesture = { kind: 'pinch', d0: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), z0: this.cam.z, wx: w.x, wy: w.y }
+  }
+  private endMove(g: Extract<Gesture, { kind: 'move' }>) {
+    this.afterEdit()
+    if (g.moved.length) this.events.dragEnd(g.moved, g.dx, g.dy)
+  }
+
   private bind() {
     const cv = this.canvas
     const on = <K extends keyof HTMLElementEventMap>(
@@ -814,74 +1075,187 @@ export class Renderer {
       this.cleanup.push(() => el.removeEventListener(type, fn, opts))
     }
     on(cv, 'pointerdown', (ev) => {
-      if (ev.button !== 0) return
+      const mouse = ev.pointerType === 'mouse'
+      if (mouse && ev.button !== 0 && ev.button !== 1) return
       cv.focus({ preventScroll: true })
-      this.drag = { x: ev.clientX, y: ev.clientY, cx: this.cam.x, cy: this.cam.y, moved: false }
-      cv.setPointerCapture(ev.pointerId)
-    })
-    on(cv, 'pointermove', (ev) => {
-      const [sx, sy] = this.local(ev)
-      const d = this.drag
-      if (d) {
-        const dx = ev.clientX - d.x,
-          dy = ev.clientY - d.y
-        if (!d.moved && Math.hypot(dx, dy) > 4) {
-          d.moved = true
-          cv.style.cursor = 'grabbing'
-        }
-        if (d.moved) {
-          this.cam.x = d.cx - dx / this.cam.z
-          this.cam.y = d.cy - dy / this.cam.z
-          this.camTween = null
-          this.dirty = this.miniDirty = true
-          this.schedule()
-        }
+      // a mouse is pressed once at a time: a pointer left over (a release missed) is dropped
+      for (const [id, p] of this.pointers) if (p.type === ev.pointerType && ev.pointerType !== 'touch') this.pointers.delete(id)
+      this.pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY, type: ev.pointerType })
+      try {
+        cv.setPointerCapture(ev.pointerId)
+      } catch {
+        /* the pointer may already be gone */
+      }
+      if (this.pointers.size >= 2) {
+        // a second finger: whatever the first one was doing becomes a pinch
+        const g = this.gesture
+        if (g && g.kind === 'move') this.endMove(g)
+        if (g && g.kind === 'marquee') this.dirty = true
+        this.startPinch()
         return
       }
-      const b = this.boxAt(sx, sy)
-      const e = b && b.kind !== 'group' ? null : this.edgeAt(sx, sy)
-      const hk = b && b.kind !== 'group' ? b.key : b && this.inHeader(b, sx, sy) ? b.key : null
-      const ek = e ? e.key : null
-      if (hk !== this.hover || ek !== this.hoverEdge) {
-        this.hover = hk
-        this.hoverEdge = hk ? null : ek
-        cv.style.cursor = this.hover || this.hoverEdge ? 'pointer' : ''
-        const he = this.hoverEdge ? this.edgeByKey.get(this.hoverEdge) : undefined
-        const hb = this.hover ? this.byKey.get(this.hover) : undefined
-        cv.title = he?.label ? he.label : hb?.tip ? hb.tip : ''
+      this.camTween = null
+      const [sx, sy] = this.local(ev)
+      if (mouse && ev.button === 1) {
+        ev.preventDefault()
+        this.gesture = { kind: 'pan', id: ev.pointerId, x: ev.clientX, y: ev.clientY, cx: this.cam.x, cy: this.cam.y }
+        return
+      }
+      const box = this.boxAt(sx, sy)
+      const header = !!box && this.inHeader(box, sx, sy)
+      const edge = box && box.kind !== 'group' ? null : this.edgeAt(sx, sy)
+      this.gesture = {
+        kind: 'press',
+        id: ev.pointerId,
+        type: ev.pointerType,
+        x: ev.clientX,
+        y: ev.clientY,
+        box,
+        header,
+        edge,
+        mods: this.modsOf(ev),
+      }
+    })
+    on(cv, 'pointermove', (ev) => {
+      const pt = this.pointers.get(ev.pointerId)
+      if (pt) {
+        pt.x = ev.clientX
+        pt.y = ev.clientY
+      }
+      const g = this.gesture
+      if (!g) {
+        const [sx, sy] = this.local(ev)
+        this.hoverAt(sx, sy)
+        return
+      }
+      if (g.kind === 'pinch') {
+        const ps = Array.from(this.pointers.values())
+        if (ps.length < 2) return
+        const [a, b] = ps
+        const d = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y))
+        const r = this.canvas.getBoundingClientRect()
+        const mx = (a.x + b.x) / 2 - r.left,
+          my = (a.y + b.y) / 2 - r.top
+        const z = this.clampZ((g.z0 * d) / g.d0)
+        // the world point under the fingers' middle stays under it
+        this.cam.z = z
+        this.cam.x = g.wx - (mx - this.W / 2) / z
+        this.cam.y = g.wy - (my - this.H / 2) / z
+        this.dirty = this.miniDirty = true
+        this.schedule()
+        return
+      }
+      if (g.id !== ev.pointerId) return
+      if (g.kind === 'press') {
+        const dx = ev.clientX - g.x,
+          dy = ev.clientY - g.y
+        if (!isDrag(dx, dy, g.type)) return
+        const b = g.box
+        const draggable = !!b && (b.kind !== 'group' || g.header)
+        if (draggable && b) {
+          const keys = this.events.dragStart(b, g.mods)
+          if (keys && keys.length) {
+            const w = this.toWorld(...this.local({ clientX: g.x, clientY: g.y }))
+            this.gesture = { kind: 'move', id: g.id, keys, wx: w.x, wy: w.y, dx: 0, dy: 0, moved: [] }
+            this.hover = null
+            this.hoverEdge = null
+            this.setCursor('grabbing')
+          }
+        }
+        if (this.gesture === g) {
+          if (g.mods.shift && !draggable) {
+            const [x0, y0] = this.local({ clientX: g.x, clientY: g.y })
+            this.gesture = { kind: 'marquee', id: g.id, x0, y0, x1: x0, y1: y0, additive: true }
+            this.setCursor('crosshair')
+          } else {
+            this.gesture = { kind: 'pan', id: g.id, x: g.x, y: g.y, cx: this.cam.x, cy: this.cam.y }
+            this.setCursor('grabbing')
+          }
+        }
+      }
+      const cur = this.gesture
+      if (!cur) return
+      if (cur.kind === 'pan') {
+        this.cam.x = cur.cx - (ev.clientX - cur.x) / this.cam.z
+        this.cam.y = cur.cy - (ev.clientY - cur.y) / this.cam.z
+        this.camTween = null
+        this.dirty = this.miniDirty = true
+        this.schedule()
+      } else if (cur.kind === 'move') {
+        const [sx, sy] = this.local(ev)
+        const w = this.toWorld(sx, sy)
+        const ddx = w.x - cur.wx,
+          ddy = w.y - cur.wy
+        if (!ddx && !ddy) return
+        const t0 = performance.now()
+        const moved = this.editor.move(cur.keys, ddx, ddy)
+        const ms = performance.now() - t0
+        this.stats.moves++
+        this.stats.moveMs += ms
+        this.stats.moveMax = Math.max(this.stats.moveMax, ms)
+        if (moved.length) cur.moved = moved
+        cur.wx = w.x
+        cur.wy = w.y
+        cur.dx += ddx
+        cur.dy += ddy
+        this.dirty = this.miniDirty = true
+        this.schedule()
+      } else if (cur.kind === 'marquee') {
+        const [sx, sy] = this.local(ev)
+        cur.x1 = sx
+        cur.y1 = sy
         this.dirty = true
         this.schedule()
       }
     })
-    on(cv, 'pointerup', (ev) => {
-      const d = this.drag
-      if (!d) return
-      this.drag = null
-      cv.style.cursor = this.hover || this.hoverEdge ? 'pointer' : ''
-      if (d.moved) return
-      const [sx, sy] = this.local(ev)
-      const b = this.boxAt(sx, sy)
-      const e = b && b.kind !== 'group' ? null : this.edgeAt(sx, sy)
-      if (e && !(b && b.kind !== 'group')) this.events.edge(e)
-      else if (b) this.events.box(b, this.inHeader(b, sx, sy), ev)
-      else this.events.empty()
-    })
-    on(cv, 'pointercancel', () => {
-      this.drag = null
-      cv.style.cursor = ''
+    const release = (ev: PointerEvent, cancelled: boolean) => {
+      this.pointers.delete(ev.pointerId)
+      const g = this.gesture
+      if (!g) return
+      if (g.kind === 'pinch') {
+        if (this.pointers.size < 2) this.gesture = null
+        return
+      }
+      if (g.id !== ev.pointerId) return
+      this.gesture = null
+      this.setCursor(this.hover || this.hoverEdge ? 'pointer' : '')
+      if (g.kind === 'move') {
+        this.endMove(g)
+        return
+      }
+      if (g.kind === 'marquee') {
+        this.dirty = true
+        this.schedule()
+        if (!cancelled) this.events.marquee(this.boxesIn(g.x0, g.y0, g.x1, g.y1), g.additive)
+        return
+      }
+      if (g.kind !== 'press' || cancelled) return
+      // a click; twice at the same place: a double-click
+      const now = performance.now()
+      const key = g.box ? g.box.key : g.edge ? g.edge.key : ''
+      const last = this.lastClick
+      if (last && now - last.t < DBL_MS && Math.hypot(ev.clientX - last.x, ev.clientY - last.y) < 10 && last.key === key) {
+        this.lastClick = null
+        if (g.box) this.events.dblbox(g.box, g.header)
+        else if (!g.edge) this.fit()
+        return
+      }
+      this.lastClick = { t: now, x: ev.clientX, y: ev.clientY, key }
+      if (g.edge && !(g.box && g.box.kind !== 'group')) this.events.edge(g.edge, g.mods)
+      else if (g.box) this.events.box(g.box, g.header, g.mods)
+      else this.events.empty(g.mods)
+    }
+    on(cv, 'pointerup', (ev) => release(ev, false))
+    on(cv, 'pointercancel', (ev) => release(ev, true))
+    on(cv, 'lostpointercapture', (ev) => {
+      if (this.pointers.has(ev.pointerId)) release(ev, true)
     })
     on(cv, 'pointerleave', () => {
-      if (this.hover || this.hoverEdge) {
+      if (!this.gesture && (this.hover || this.hoverEdge)) {
         this.hover = this.hoverEdge = null
         this.dirty = true
         this.schedule()
       }
-    })
-    on(cv, 'dblclick', (ev) => {
-      const [sx, sy] = this.local(ev)
-      const b = this.boxAt(sx, sy)
-      if (b) this.events.dblbox(b, this.inHeader(b, sx, sy))
-      else this.fit()
     })
     on(
       cv,
@@ -904,10 +1278,10 @@ export class Renderer {
         ArrowDown: [0, step],
       }
       const m = moves[ev.key]
-      if (m && !ev.altKey) {
-        this.pan(m[0], m[1])
-        ev.preventDefault()
-      }
+      if (!m || ev.altKey) return
+      if (ev.shiftKey) this.events.nudge(Math.sign(m[0]) * 10, Math.sign(m[1]) * 10)
+      else this.pan(m[0], m[1])
+      ev.preventDefault()
     })
     const mini = this.mini
     on(mini, 'pointerdown', (ev) => {
@@ -927,21 +1301,6 @@ export class Renderer {
       this.ro.observe(mini)
     }
   }
-}
-
-function midpoint(p: number[]): [number, number] {
-  let total = 0
-  for (let k = 0; k < p.length - 2; k += 2) total += Math.hypot(p[k + 2] - p[k], p[k + 3] - p[k + 1])
-  let half = total / 2
-  for (let k = 0; k < p.length - 2; k += 2) {
-    const l = Math.hypot(p[k + 2] - p[k], p[k + 3] - p[k + 1])
-    if (half <= l) {
-      const f = l ? half / l : 0
-      return [p[k] + (p[k + 2] - p[k]) * f, p[k + 1] + (p[k + 3] - p[k + 1]) * f]
-    }
-    half -= l
-  }
-  return [p[0], p[1]]
 }
 
 function segDist(px: number, py: number, x0: number, y0: number, x1: number, y1: number) {

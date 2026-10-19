@@ -49,7 +49,46 @@ export const layoutStats = { runs: 0, hits: 0, ms: 0, last: 0, failures: 0 }
 
 const packed = (n: number, extra?: Record<string, string>) => n > BIG && !(extra && extra['elk.partitioning.activate'])
 
+/**
+ * How one container is laid out (layoutDoc.ts names them for the viewer):
+ *   grouped  layered top-down, the components packed to the window (default)
+ *   down     one flow of dependency layers, top to bottom
+ *   right    one flow of dependency layers, left to right
+ *   force    force directed (seeded: the same input gives the same result)
+ * Hierarchical runs once over the whole drawing (runNested).
+ */
+export type ContainerAlgo = 'grouped' | 'down' | 'right' | 'force'
+
+/** algoOptions: the ELK options of an algorithm, given to runLayout as extra options. */
+export function algoOptions(algo: ContainerAlgo): Record<string, string> {
+  switch (algo) {
+    case 'down':
+    case 'right':
+      return {
+        'elk.direction': algo === 'down' ? 'DOWN' : 'RIGHT',
+        'elk.separateConnectedComponents': 'false',
+        'elk.layered.considerModelOrder.strategy': 'NONE',
+        'elk.layered.spacing.nodeNodeBetweenLayers': algo === 'down' ? '54' : '64',
+      }
+    case 'force':
+      return {
+        'elk.algorithm': 'force',
+        'elk.force.model': 'EADES',
+        'elk.force.repulsion': '1',
+        'elk.randomSeed': '7',
+        'elk.spacing.nodeNode': '20',
+      }
+    default:
+      return {}
+  }
+}
+
+/** routes: the algorithm routes its edges (orthogonally), so they can be drawn as they are. */
+export const routesEdges = (algo: ContainerAlgo, n: number) => algo !== 'force' && n <= BIG
+
 function options(dir: string, aspect: number, n: number, extra?: Record<string, string>): Record<string, string> {
+  if (extra && extra['elk.algorithm'] === 'force' && !packed(n, extra))
+    return Object.assign({ 'elk.padding': '[top=0,left=0,bottom=0,right=0]', 'elk.aspectRatio': String(aspect) }, extra)
   const o: Record<string, string> = packed(n, extra)
     ? {
         'elk.algorithm': 'rectpacking',
@@ -171,11 +210,18 @@ export async function runLayout(
  * runPartitioned lays out a left-to-right flow whose columns are fixed:
  * node.c is the column (minCol the leftmost).
  */
-export function runPartitioned(key: string, nodes: LayoutNode[], edges: LayoutEdge[], minCol: number, aspect: number) {
+export function runPartitioned(
+  key: string,
+  nodes: LayoutNode[],
+  edges: LayoutEdge[],
+  minCol: number,
+  aspect: number,
+  dir: 'RIGHT' | 'DOWN' = 'RIGHT',
+) {
   nodes.forEach((n) => {
     n.opts = { 'elk.partitioning.partition': String((n.c ?? 0) - minCol) }
   })
-  return runLayout(key, nodes, edges, 'RIGHT', aspect, {
+  return runLayout(key, nodes, edges, dir, aspect, {
     'elk.partitioning.activate': 'true',
     'elk.separateConnectedComponents': 'false',
     'elk.layered.spacing.nodeNodeBetweenLayers': '64',
@@ -183,3 +229,92 @@ export function runPartitioned(key: string, nodes: LayoutNode[], edges: LayoutEd
   })
 }
 
+
+/** A node of a nested layout: a leaf (size) or a container (children). */
+export interface NestedNode {
+  id: string
+  width?: number
+  height?: number
+  children?: NestedNode[]
+}
+
+export interface NestedResult {
+  /** Position of each node relative to its container's top-left (padding included). */
+  pos: Record<string, { x: number; y: number }>
+  /** Size of each container as laid out. */
+  size: Record<string, { w: number; h: number }>
+}
+
+/**
+ * runNested lays out a whole nested drawing in one run (ELK layered with
+ * hierarchy handling): the layers follow the relations across containers.
+ * pad is the room inside a container (its header on top). Resolves to null
+ * when ELK is missing or fails.
+ */
+export async function runNested(
+  key: string,
+  top: NestedNode[],
+  edges: LayoutEdge[],
+  pad: { top: number; left: number; right: number; bottom: number },
+): Promise<NestedResult | null> {
+  const hit = nestedCache.get(key)
+  if (hit) {
+    layoutStats.hits++
+    return hit
+  }
+  const e = engine()
+  if (!e) return null
+  const padding = '[top=' + pad.top + ',left=' + pad.left + ',bottom=' + pad.bottom + ',right=' + pad.right + ']'
+  const ids = new Set<string>()
+  const conv = (n: NestedNode): ElkNode => {
+    ids.add(n.id)
+    if (n.children)
+      return {
+        id: n.id,
+        layoutOptions: { 'elk.padding': padding },
+        children: n.children.map(conv),
+      }
+    return { id: n.id, width: n.width, height: n.height }
+  }
+  const g: ElkNode = {
+    id: 'root',
+    layoutOptions: {
+      'elk.algorithm': 'layered',
+      'elk.direction': 'DOWN',
+      'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
+      'elk.edgeRouting': 'ORTHOGONAL',
+      'elk.spacing.nodeNode': '22',
+      'elk.layered.spacing.nodeNodeBetweenLayers': '46',
+      'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+      'elk.padding': '[top=0,left=0,bottom=0,right=0]',
+    },
+    children: top.map(conv),
+  }
+  g.edges = edges
+    .filter((x) => x.s !== x.t && ids.has(x.s) && ids.has(x.t))
+    .map((x) => ({ id: x.id, sources: [x.s], targets: [x.t] }))
+  const t0 = performance.now()
+  try {
+    const out = await e.layout(g)
+    const res: NestedResult = { pos: {}, size: {} }
+    const walk = (n: ElkNode) => {
+      for (const c of n.children ?? []) {
+        res.pos[c.id] = { x: c.x || 0, y: c.y || 0 }
+        if (c.children && c.children.length) res.size[c.id] = { w: c.width || 0, h: c.height || 0 }
+        walk(c)
+      }
+    }
+    walk(out)
+    layoutStats.runs++
+    layoutStats.last = performance.now() - t0
+    layoutStats.ms += layoutStats.last
+    if (nestedCache.size > 40) nestedCache.delete(nestedCache.keys().next().value as string)
+    nestedCache.set(key, res)
+    return res
+  } catch {
+    layoutStats.failures++
+    return null
+  }
+}
+
+const nestedCache = new Map<string, NestedResult>()

@@ -49,6 +49,7 @@ func (m *model) openWeb() tea.Cmd {
 		}
 		w := &workspace{dir: root, root: root, f: f, store: store, progress: io.Discard, cache: flow.NewCache()}
 		w.inv, w.invErr = newInvestigator(store, root, f.ai)
+		w.layout, _ = layoutFile(root)
 		ctx, cancel := context.WithCancel(context.Background())
 		var changes chan struct{}
 		if ev, err := watch(root); err == nil {

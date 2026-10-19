@@ -8,10 +8,15 @@
 // Each column holds one distance; a column keeps its strongest relations
 // first and says how many more there are.
 
-import { addEdge, leafSize, lineAggOf, shown, summary } from './arch'
-import { runPartitioned, type LayoutNode } from './layout'
+import { addEdge, isMinor, lineAggOf, shown, summary, type LayoutInput } from './arch'
+import { cardOf } from './cards'
+import { SceneEditor } from './edit'
+import { placeAvoiding, removeOverlaps } from './geometry'
+import { algoOptions, runLayout, runPartitioned, type LayoutNode, type LayoutResult } from './layout'
+import type { Algorithm } from './layoutDoc'
 import type { Model } from './model'
-import type { Agg, Box, Conf, Filters, FocusState, FocusView, GEdge, SceneEdge, TItem } from './types'
+import { smoothRoute } from './route'
+import type { Agg, Box, Conf, Filters, FocusState, FocusView, GEdge, Scene, SceneEdge, TItem } from './types'
 import { CONF_RANK, FLOW, STRUCTURAL, SYMBOL, TYPE } from './vocab'
 
 export const PER_COL = 36
@@ -49,7 +54,12 @@ function unitFn(D: Model, center: TItem): (x: number) => number {
 
 export const isSymbolFocus = (t: TItem) => !!(t.n && SYMBOL[t.kind])
 
-export async function buildFocus(D: Model, S: FocusInput, aspect: number): Promise<FocusView> {
+/**
+ * buildFocus lays out focus mode. Algorithms: the columns flow left to right
+ * (Grouped, Hierarchical, Left to right), top to bottom (Top to bottom), or
+ * force directed; positions the viewer gave are absolute.
+ */
+export async function buildFocus(D: Model, S: FocusInput, aspect: number, L: LayoutInput): Promise<FocusView> {
   const { T, N, E } = D
   const center = T[S.focus.i]
   const unit = unitFn(D, center)
@@ -139,8 +149,8 @@ export async function buildFocus(D: Model, S: FocusInput, aspect: number): Promi
     .sort((a, b) => a - b)
     .forEach((c) => {
       cols[c].forEach((u) => {
-        const s = leafSize(D, T[u], false, true)
-        sizes.set('f' + u, s)
+        const s = cardOf(D, T[u], false, true)
+        sizes.set('f' + u, { w: s.w, h: s.h })
         nodes.push({ id: 'f' + u, width: s.w, height: s.h, c })
       })
       if (more[c]) {
@@ -149,17 +159,65 @@ export async function buildFocus(D: Model, S: FocusInput, aspect: number): Promi
       }
     })
   const edges = Array.from(agg.values()).map((g) => ({ id: g.key, s: 'f' + g.a, t: 'f' + g.b }))
+  const algo: Algorithm = L.algorithm === 'manual' ? 'grouped' : L.algorithm
   const key =
     'focus|' +
+    algo +
+    '|' +
     T[S.focus.i].id +
     '|' +
     nodes.map((n) => n.id + ':' + n.c).join(',') +
     '|' +
     edges.map((e) => e.id).join(',')
-  const res = await runPartitioned(key, nodes, edges, minCol, aspect)
+  let res: LayoutResult
+  if (algo === 'force') {
+    nodes.forEach((n) => delete n.opts)
+    res = await runLayout(key, nodes, edges, 'RIGHT', aspect, algoOptions('force'))
+    const rects = nodes.map((n) => ({ ...(res.pos[n.id] || { x: 0, y: 0 }), w: n.width, h: n.height }))
+    removeOverlaps(rects, 24)
+    const pos: LayoutResult['pos'] = {}
+    nodes.forEach((n, j) => (pos[n.id] = { x: rects[j].x, y: rects[j].y }))
+    res = { ...res, pos }
+  } else res = await runPartitioned(key, nodes, edges, minCol, aspect, algo === 'down' ? 'DOWN' : 'RIGHT')
+  const routed = algo !== 'force'
+
+  // the viewer's positions win; the others avoid them
+  const pos = new Map<string, { x: number; y: number }>(),
+    atAuto = new Set<string>(),
+    pinned = new Set<string>()
+  const fixed: { x: number; y: number; w: number; h: number }[] = [],
+    free: string[] = []
+  for (const nd of nodes) {
+    const u = nd.id.charAt(0) === 'f' ? Number(nd.id.slice(1)) : -1
+    const m = u >= 0 ? L.nodes[T[u].id] : undefined
+    const a = res.pos[nd.id] || { x: 0, y: 0 }
+    if (m) {
+      pos.set(nd.id, { x: m.x, y: m.y })
+      pinned.add(nd.id)
+      fixed.push({ x: m.x, y: m.y, w: nd.width, h: nd.height })
+      if (Math.abs(m.x - a.x) < 0.5 && Math.abs(m.y - a.y) < 0.5) atAuto.add(nd.id)
+    } else free.push(nd.id)
+  }
+  if (fixed.length && free.length) {
+    const rects = free.map((id) => {
+      const nd = nodes.find((n) => n.id === id)!,
+        a = res.pos[id] || { x: 0, y: 0 }
+      return { x: a.x, y: a.y, w: nd.width, h: nd.height }
+    })
+    placeAvoiding(fixed, rects).forEach((p, j) => {
+      const id = free[j],
+        a = res.pos[id] || { x: 0, y: 0 }
+      pos.set(id, p)
+      if (Math.abs(p.x - a.x) < 0.5 && Math.abs(p.y - a.y) < 0.5) atAuto.add(id)
+    })
+  } else
+    for (const id of free) {
+      pos.set(id, res.pos[id] || { x: 0, y: 0 })
+      atAuto.add(id)
+    }
 
   const boxes: Box[] = nodes.map((nd) => {
-    const p = res.pos[nd.id] || { x: 0, y: 0 },
+    const p = pos.get(nd.id)!,
       s = sizes.get(nd.id)!
     if (nd.id.charAt(0) === 'm') {
       const d = Number(nd.id.slice(1))
@@ -179,47 +237,58 @@ export async function buildFocus(D: Model, S: FocusInput, aspect: number): Promi
     }
     const u = Number(nd.id.slice(1)),
       t = T[u]
+    const card = cardOf(D, t, false, true)
     return {
       key: nd.id,
       ref: u,
+      id: t.id,
       kind: 'node',
       x: p.x,
       y: p.y,
       w: s.w,
       h: s.h,
       depth: t.depth,
-      title: D.displayName(t),
+      title: card.title,
       sub: D.subtitle(t),
+      kindLabel: card.kind,
+      stats: card.stats,
+      deps: card.deps,
       color: D.kindColor(t),
       tip: D.reference(t),
       focusCol: nd.c,
+      pinned: pinned.has(nd.id),
+      locked: !!L.nodes[t.id]?.locked,
     }
   })
-  const byKey = new Map(boxes.map((b) => [b.key, b]))
+  const style = L.edges
   const sceneEdges: SceneEdge[] = Array.from(agg.values()).map((g) => {
-    let pts = res.edges[g.key]
-    if (!pts) {
-      const A = byKey.get('f' + g.a)!,
-        B = byKey.get('f' + g.b)!
-      const ax = A.x + A.w,
-        ay = A.y + A.h / 2,
-        bx = B.x,
-        by = B.y + B.h / 2,
-        mx = (ax + bx) / 2
-      pts = [ax, ay, mx, ay, mx, by, bx, by]
+    const sk = 'f' + g.a,
+      tk = 'f' + g.b
+    const route = routed && atAuto.has(sk) && atAuto.has(tk) && style !== 'straight' ? res.edges[g.key] : undefined
+    const a = lineAggOf(g)
+    return {
+      key: g.key,
+      s: sk,
+      t: tk,
+      conf: g.best,
+      n: g.n,
+      label: summary(g),
+      pts: route ? (style === 'smooth' ? smoothRoute(route) : route.slice()) : [],
+      local: !route,
+      agg: a,
+      minor: isMinor(a),
     }
-    return { key: g.key, s: 'f' + g.a, t: 'f' + g.b, conf: g.best, n: g.n, label: summary(g), pts, agg: lineAggOf(g) }
   })
-  let x0 = Infinity,
-    y0 = Infinity,
-    x1 = -Infinity,
-    y1 = -Infinity
-  boxes.forEach((b) => {
-    x0 = Math.min(x0, b.x)
-    y0 = Math.min(y0, b.y)
-    x1 = Math.max(x1, b.x + b.w)
-    y1 = Math.max(y1, b.y + b.h)
-  })
+  const scene: Scene = {
+    boxes,
+    edges: sceneEdges,
+    bounds: { x: 0, y: 0, w: 1, h: 1 },
+    style,
+    prefer: algo === 'down' ? 'v' : 'h',
+  }
+  const ed = new SceneEditor(scene)
+  ed.routeAll()
+  ed.bounds()
   const out = new Map<string, SceneEdge[]>(),
     inn = new Map<string, SceneEdge[]>()
   sceneEdges.forEach((e) => {
@@ -241,9 +310,10 @@ export async function buildFocus(D: Model, S: FocusInput, aspect: number): Promi
     out,
     inn,
     more,
-    scene: { boxes, edges: sceneEdges, bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } },
+    scene,
     counts: { boxes: boxes.length, callers, callees, edges: sceneEdges.length },
     keyOf: (i: number) => (col.has(i) ? 'f' + i : null),
     symbolMode,
+    layout: { algorithm: L.algorithm, used: algo, fellBack: false },
   }
 }

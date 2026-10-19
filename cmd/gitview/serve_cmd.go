@@ -106,6 +106,7 @@ func serveRepo(ctx context.Context, stdout, stderr io.Writer, dir string, o serv
 	}
 	w := &workspace{dir: dir, root: root, f: o.audit, store: store, progress: stderr, cache: flow.NewCache()}
 	w.inv, w.invErr = newInvestigator(store, root, o.audit.ai)
+	w.layout, _ = layoutFile(root)
 	var changes chan struct{}
 	if o.watch {
 		if ev, err := watch(root); err == nil {
@@ -145,6 +146,7 @@ type workspace struct {
 	cache     *flow.Cache
 	inv       *ai.Investigator
 	invErr    error
+	layout    string // file of the Architecture view's saved card positions
 
 	mu      sync.Mutex
 	dirty   bool
@@ -186,7 +188,10 @@ func (w *workspace) server(view string, changes <-chan struct{}) *server.Server 
 		Changes: changes,
 		// Development only (make dev): a fixed token gives the Vite dev
 		// server a stable URL.
-		Token: os.Getenv("GITVIEW_SERVE_TOKEN"),
+		Token:       os.Getenv("GITVIEW_SERVE_TOKEN"),
+		LayoutFile:  w.layout,
+		ParseLayout: gexport.ParseLayout,
+		MaxLayout:   gexport.MaxLayoutSize,
 	})
 }
 

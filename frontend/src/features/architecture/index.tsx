@@ -21,6 +21,8 @@ import { Crumbs } from './Crumbs'
 import { HelpModal } from './HelpModal'
 import { Inspector } from './Inspector'
 import { layoutStats } from './layout'
+import { SaveBadge } from './LayoutPanel'
+import { useStore } from './saveState'
 import { modelOf, type Model } from './model'
 import { SearchModal } from './SearchModal'
 import { Stage } from './Stage'
@@ -84,6 +86,7 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
   const [searchOpen, setSearchOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const [layoutOpen, setLayoutOpen] = useState(false)
 
   const showSidebar = useCallback((on: boolean) => {
     setSidebar(on)
@@ -137,7 +140,7 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
 
   // keyboard shortcuts of the explorer
   useEffect(() => {
-    const m = { searchOpen, helpOpen, filtersOpen }
+    const m = { searchOpen, helpOpen, filtersOpen, layoutOpen }
     const onKey = (ev: KeyboardEvent) => {
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'k' || ev.key === 'K')) {
         setHelpOpen(false)
@@ -149,13 +152,25 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
         if (m.searchOpen) return setSearchOpen(false)
         if (m.helpOpen) return setHelpOpen(false)
         if (m.filtersOpen) return setFiltersOpen(false)
+        if (m.layoutOpen) return setLayoutOpen(false)
         if (isTyping(ev)) return
         const S = ctrl.getSnapshot().S
-        if (S.sel) ctrl.clearSelection()
+        if (S.isolate) ctrl.setIsolate(false)
+        else if (S.sel) ctrl.clearSelection()
         else if (S.focus) ctrl.exitFocus()
         return
       }
       if (isTyping(ev) || m.searchOpen || m.helpOpen) return
+      // editing: undo, redo, select all
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+        const k = ev.key.toLowerCase()
+        if (k === 'z' && !ev.shiftKey) ctrl.undo()
+        else if ((k === 'z' && ev.shiftKey) || k === 'y') ctrl.redo()
+        else if (k === 'a') ctrl.selectAll()
+        else return
+        ev.preventDefault()
+        return
+      }
       if (ev.altKey && ev.key === 'ArrowLeft') {
         history.back()
         ev.preventDefault()
@@ -178,7 +193,12 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
       else if (k === '3') {
         if (offered('security')) navigate('security')
         else toast('This page has no security audit: export it with gitview audit export.')
-      } else if (k === 'f') ctrl.fitView()
+      } else if (k === 'f') ctrl.zoomToFit()
+      else if (k === '0') ctrl.fitView()
+      else if (k === 'c') ctrl.fitSelection()
+      else if (k === 'l' || k === 'L') ctrl.toggleLock()
+      else if (k === 'o') ctrl.setIsolate(!ctrl.getSnapshot().S.isolate)
+      else if (k === 'd') ctrl.drillDown()
       else if (k === 'F') toggleFullscreen()
       else if (k === '+' || k === '=') ctrl.zoomBy(1.25)
       else if (k === '-' || k === '_') ctrl.zoomBy(0.8)
@@ -200,6 +220,7 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
     searchOpen,
     helpOpen,
     filtersOpen,
+    layoutOpen,
     sidebar,
     inspector,
     showSidebar,
@@ -248,7 +269,7 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
         </div>
       </HeaderSlot>
       <StatusSlot>
-        <Status D={D} snap={snap} />
+        <Status D={D} ctrl={ctrl} snap={snap} />
       </StatusSlot>
       <Panes
         id="architecture"
@@ -292,6 +313,8 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
           onFullscreen={toggleFullscreen}
           filtersOpen={filtersOpen}
           setFiltersOpen={setFiltersOpen}
+          layoutOpen={layoutOpen}
+          setLayoutOpen={setLayoutOpen}
           sidebar={sidebar}
           inspector={inspector}
           onSidebar={() => showSidebar(true)}
@@ -304,15 +327,19 @@ function ArchitectureExplorer({ raw, params }: { raw: GraphSection; params: URLS
   )
 }
 
-function Status({ D, snap }: { D: Model; snap: ReturnType<Explorer['getSnapshot']> }) {
+const SCALE_NAME = { overview: 'Repository overview', module: 'Module explorer', symbol: 'Symbol explorer' }
+
+function Status({ D, ctrl, snap }: { D: Model; ctrl: Explorer; snap: ReturnType<Explorer['getSnapshot']> }) {
   const v = snap.view
   const s = D.raw.stats
   const comp = D.raw.completeness
+  const st = useStore(ctrl.store)
   return (
     <>
       {v && (
         <span className="truncate">
-          {(v.kind === 'focus' ? 'Focus' : 'Architecture') +
+          {SCALE_NAME[ctrl.scale()] +
+            (v.kind === 'focus' ? ' · focus' : '') +
             ' · ' +
             plural(v.counts.boxes, 'element') +
             ' · ' +
@@ -323,6 +350,7 @@ function Status({ D, snap }: { D: Model; snap: ReturnType<Explorer['getSnapshot'
             ' ms'}
         </span>
       )}
+      <SaveBadge st={st} onRetry={() => void ctrl.store.flush()} />
       {comp && comp.status !== 'complete' && (
         <span className="text-warning" title={(comp.reasons ?? []).slice(0, 10).join('\n')}>
           analysis {comp.status}

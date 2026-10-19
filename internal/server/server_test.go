@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -178,5 +180,55 @@ func TestEventsStream(t *testing.T) {
 	var payload map[string]string
 	if event != "changed" || json.Unmarshal([]byte(data), &payload) != nil || payload["at"] == "" {
 		t.Errorf("event %q %q", event, data)
+	}
+}
+
+func TestLayoutIsStoredOutsideTheRepository(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "cache", "layout.json")
+	h := start(t, Config{LayoutFile: file, Sections: map[string]Analyzer{},
+		ParseLayout: func(b []byte) (json.RawMessage, error) {
+			var v struct {
+				V int `json:"layout_version"`
+			}
+			if json.Unmarshal(b, &v) != nil || v.V != 1 {
+				return nil, errors.New("not a layout")
+			}
+			return b, nil
+		}})
+	put := func(body, ctype string, hdr map[string]string) (int, string) {
+		req, _ := http.NewRequest("PUT", h.base+"/api/layout", strings.NewReader(body))
+		req.Header.Set("Content-Type", ctype)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+	if resp, body := h.do(t, "GET", "/api/layout", h.tok()); resp.StatusCode != 204 || body != "" {
+		t.Errorf("no layout yet: %d %q", resp.StatusCode, body)
+	}
+	doc := `{"layout_version":1,"views":{"repository":{"nodes":{"package:x":{"x":1,"y":2}}}}}`
+	if code, _ := put(doc, "application/json", nil); code != 403 {
+		t.Errorf("PUT without token: %d", code)
+	}
+	if code, _ := put(doc, "text/plain", h.tok()); code != 415 {
+		t.Errorf("PUT non-JSON: %d", code)
+	}
+	if code, out := put(`{"layout_version":7}`, "application/json", h.tok()); code != 400 || !strings.Contains(out, "not a layout") {
+		t.Errorf("invalid document: %d %s", code, out)
+	}
+	if code, out := put(doc, "application/json", h.tok()); code != 200 || !strings.Contains(out, `"saved":true`) {
+		t.Fatalf("PUT: %d %s", code, out)
+	}
+	if resp, body := h.do(t, "GET", "/api/layout", h.tok()); resp.StatusCode != 200 || body != doc {
+		t.Errorf("GET after PUT: %d %s", resp.StatusCode, body)
+	}
+	if fi, err := os.Stat(filepath.Dir(file)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("layout directory: %v", err)
 	}
 }

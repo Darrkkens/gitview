@@ -41,7 +41,7 @@ npm run sample -- /tmp/g.html graph      # → .samples/graph.json (git-ignored)
 ```
 
 Before committing: `make web` (rebuilds `dist/index.html`; CI checks it is up to date), `npm run typecheck`,
-`npm run lint`, `go test ./...`.
+`npm run lint`, `npm test` (unit tests, Vitest), `go test ./...`.
 
 ## Layout
 

@@ -46,6 +46,6 @@ export function fit(text: string, f: string, max: number): string {
   return text.slice(0, lo) + '…'
 }
 
-export const TITLE_FONT = () => font(500, 12.5)
+export const TITLE_FONT = () => font(600, 12.5)
 export const SUB_FONT = () => font(400, 11)
 export const HEAD_FONT = () => font(600, 12)

@@ -4,10 +4,14 @@ import (
 	"compress/gzip"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +28,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/section/{name}/refresh", s.api(s.refresh))
 	mux.HandleFunc("GET /api/sources", s.sources)
 	mux.HandleFunc("GET /api/events", s.stream)
+	if s.cfg.LayoutFile != "" {
+		mux.HandleFunc("GET /api/layout", s.getLayout)
+		mux.HandleFunc("PUT /api/layout", s.putLayout)
+	}
 	for pattern, fn := range s.cfg.API {
 		mux.HandleFunc(pattern, s.api(fn))
 	}
@@ -240,4 +248,80 @@ func writeMaybeGzip(w http.ResponseWriter, r *http.Request, body []byte) {
 	zw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
 	zw.Write(body)
 	zw.Close()
+}
+
+// ---------- layout ----------
+
+func (s *Server) getLayout(w http.ResponseWriter, r *http.Request) {
+	s.layoutMu.Lock()
+	data, err := os.ReadFile(s.cfg.LayoutFile)
+	s.layoutMu.Unlock()
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// nothing saved yet: not an error (the browser would log a 404)
+		w.WriteHeader(http.StatusNoContent)
+	case err != nil:
+		writeJSONError(w, http.StatusInternalServerError, err)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		writeMaybeGzip(w, r, data)
+	}
+}
+
+// putLayout stores the whole document atomically, after validation.
+func (s *Server) putLayout(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		http.Error(w, "JSON expected", http.StatusUnsupportedMediaType)
+		return
+	}
+	limit := s.cfg.MaxLayout
+	if limit <= 0 {
+		limit = 8 << 20
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, errors.New("layout too large"))
+		return
+	}
+	doc := json.RawMessage(body)
+	if s.cfg.ParseLayout != nil {
+		if doc, err = s.cfg.ParseLayout(body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err)
+			return
+		}
+	} else if !json.Valid(body) {
+		writeJSONError(w, http.StatusBadRequest, errors.New("invalid JSON"))
+		return
+	}
+	s.layoutMu.Lock()
+	err = writeFileAtomic(s.cfg.LayoutFile, doc)
+	s.layoutMu.Unlock()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"saved":true}`+"\n")
+}
+
+// writeFileAtomic replaces path with data (a temporary file renamed over
+// it), creating its private directory.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".layout-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

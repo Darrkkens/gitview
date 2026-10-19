@@ -6,7 +6,7 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { fmt } from '../../lib/format'
 import { useTheme } from '../../lib/theme'
-import { defaultFilters, type Explorer } from './controller'
+import { defaultFilters, type Explorer, type ExplorerState } from './controller'
 import type { Model } from './model'
 import type { Filters } from './types'
 import { LineSample, Seg } from './ui'
@@ -54,6 +54,7 @@ export function FiltersPanel({
   ctrl,
   filters,
   pathDepth,
+  S,
   onClose,
   anchor,
 }: {
@@ -61,6 +62,7 @@ export function FiltersPanel({
   ctrl: Explorer
   filters: Filters
   pathDepth: number
+  S: ExplorerState
   onClose: () => void
   anchor: React.RefObject<HTMLElement | null>
 }) {
@@ -134,14 +136,35 @@ export function FiltersPanel({
         </div>
       </Group>
       <Group title="Selection">
-        <Seg
-          options={[
-            [0, 'Full dependency path'],
-            [1, 'Direct only'],
-          ]}
-          value={pathDepth ? 1 : 0}
-          onChange={(v) => ctrl.setPathDepth(v)}
-        />
+        <div className="flex flex-col gap-2">
+          <Seg
+            options={[
+              [0, 'Full dependency path'],
+              [1, 'Direct only'],
+            ]}
+            value={pathDepth ? 1 : 0}
+            onChange={(v) => ctrl.setPathDepth(v)}
+          />
+          <Seg
+            options={[
+              ['both', 'Both ways'],
+              ['out', 'Dependencies'],
+              ['in', 'Dependents'],
+            ]}
+            value={S.direction}
+            onChange={(v) => ctrl.setDirection(v)}
+          />
+          <Check
+            label="Only what the selection relates to (O)"
+            on={S.isolate}
+            set={(v) => ctrl.setIsolate(v)}
+          />
+          <Check
+            label="Hide secondary lines (only weak or type-use relations)"
+            on={S.hideMinor}
+            set={(v) => ctrl.setHideMinor(v)}
+          />
+        </div>
       </Group>
       <Group title="Theme">
         <Seg

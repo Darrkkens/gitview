@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -54,6 +55,13 @@ type Config struct {
 	// Token replaces the random token (development: a stable URL for the
 	// Vite dev server); "" draws one.
 	Token string
+	// LayoutFile is where GET and PUT /api/layout keep the card positions of
+	// the Architecture view (outside the repository); "" disables them.
+	LayoutFile string
+	// ParseLayout validates a layout document before it is stored.
+	ParseLayout func([]byte) (json.RawMessage, error)
+	// MaxLayout bounds a stored layout document.
+	MaxLayout int64
 }
 
 // Server serves one repository.
@@ -66,6 +74,7 @@ type Server struct {
 	events   *broker
 	changed  time.Time
 	mu       sync.Mutex
+	layoutMu sync.Mutex
 }
 
 // New prepares a server; Listen binds it.

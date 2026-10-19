@@ -150,6 +150,23 @@ const GLYPHS = {
   shield: 'M8 1.5 13.5 3.5v4c0 3.5-2.4 6-5.5 7-3.1-1-5.5-3.5-5.5-7v-4z',
   sidebar: 'M2 2.5h12v11H2zM6 2.5v11',
   inspector: 'M2 2.5h12v11H2zM10 2.5v11',
+  layout: 'M2 2.5h5v4H2zM9 9.5h5v4H9zM4.5 6.5v5H9M11.5 9.5v-5H7',
+  undo: 'M5.5 3 2.5 6l3 3M2.5 6h7a4 4 0 0 1 0 8h-3',
+  redo: 'M10.5 3l3 3-3 3M13.5 6h-7a4 4 0 0 0 0 8h3',
+  lock: 'M4 7.5h8v6H4zM5.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2',
+  unlock: 'M4 7.5h8v6H4zM5.5 7.5V5.5a2.5 2.5 0 0 1 4.8-1',
+  alignLeft: 'M2.5 2v12M4.5 4.5h8v2.5h-8zM4.5 9h5v2.5h-5z',
+  alignCenter: 'M8 2v12M3.5 4.5h9v2.5h-9zM5.5 9h5v2.5h-5z',
+  alignRight: 'M13.5 2v12M3.5 4.5h8v2.5h-8zM6.5 9h5v2.5h-5z',
+  distH: 'M2 2.5v11M14 2.5v11M5.5 5h1.5v6H5.5zM9 5h1.5v6H9z',
+  distV: 'M2.5 2h11M2.5 14h11M5 5.5h6V7H5zM5 9h6v1.5H5z',
+  isolate: 'M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5M2 2h3M11 2h3M2 14h3M11 14h3M2 2v3M14 2v3M2 11v3M14 11v3',
+  drill: 'M3 3h10v4H3zM6 10h4v3H6zM8 7v3',
+  reset: 'M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5V5H5',
+  fitSel: 'M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4M6 6h4v4H6z',
+  upload: 'M8 13.5V5M4.5 8.5 8 5l3.5 3.5M2.5 2.5h11',
+  download: 'M8 2v8.5M4.5 7 8 10.5 11.5 7M2.5 13.5h11',
+  select: 'M3 2.5l8.5 5-3.8 1 2.3 4-1.5.8-2.3-4L3.5 12z',
 }
 
 export type GlyphName = keyof typeof GLYPHS

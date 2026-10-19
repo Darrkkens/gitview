@@ -147,7 +147,9 @@ func (m *model) graphWrite(format string) tea.Cmd {
 		if format == "json" {
 			err = gexport.JSON(&buf, g, "")
 		} else {
-			err = gexport.HTML(&buf, g, gexport.HTMLOptions{})
+			// The positions saved by gitview serve, when there are some.
+			layout, _ := savedLayout(g.Root)
+			err = gexport.HTML(&buf, g, gexport.HTMLOptions{Layout: layout})
 		}
 		if err == nil {
 			err = export.WriteFile(path, buf.Bytes(), false)

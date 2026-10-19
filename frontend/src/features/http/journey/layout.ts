@@ -12,6 +12,8 @@ export interface LNode {
   height: number
   /** column (partition), 0 = leftmost / topmost */
   c: number
+  /** rank inside its layer, for the nodes whose order is given (the handler chain's) */
+  rank?: number
 }
 
 export interface LEdge {
@@ -86,7 +88,10 @@ export async function layoutColumns(
   edges: LEdge[],
   dir: 'RIGHT' | 'DOWN',
   aspect: number,
+  /** node placement: straight lines (BRANDES_KOEPF, the default) or short ones, compact (NETWORK_SIMPLEX) */
+  place: 'BRANDES_KOEPF' | 'NETWORK_SIMPLEX' = 'BRANDES_KOEPF',
 ): Promise<LayoutResult> {
+  key += '|' + place
   const hit = cache.get(key)
   if (hit) return hit
   const t0 = performance.now()
@@ -111,17 +116,18 @@ export async function layoutColumns(
         'elk.spacing.componentComponent': '30',
         'elk.layered.thoroughness': '4',
         'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
-        'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+        'elk.layered.nodePlacement.strategy': place,
         'elk.separateConnectedComponents': 'false',
         'elk.partitioning.activate': 'true',
+        'elk.layered.crossingMinimization.semiInteractive': String(nodes.some((n) => n.rank !== undefined)),
         'elk.padding': '[top=0,left=0,bottom=0,right=0]',
       },
-      children: nodes.map((n) => ({
-        id: n.id,
-        width: n.width,
-        height: n.height,
-        layoutOptions: { 'elk.partitioning.partition': String(n.c - minCol) },
-      })),
+      children: nodes.map((n) => {
+        const o: Record<string, string> = { 'elk.partitioning.partition': String(n.c - minCol) }
+        // semi-interactive crossing minimisation keeps ranked nodes in their order
+        if (n.rank !== undefined) o['elk.position'] = '(0,' + n.rank * 100 + ')'
+        return { id: n.id, width: n.width, height: n.height, layoutOptions: o }
+      }),
       edges: edges
         .filter((x) => x.s !== x.t && ids.has(x.s) && ids.has(x.t))
         .map((x) => ({ id: x.id, sources: [x.s], targets: [x.t] })),

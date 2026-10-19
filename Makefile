@@ -44,10 +44,10 @@ watch:
 		echo "air is not installed: go install github.com/air-verse/air@latest"; exit 1; \
 	fi
 
-## test: Go tests and the web UI's type check
+## test: Go tests, the web UI's type check and unit tests
 test:
 	@go test ./...
-	@if [ -d frontend/node_modules ]; then npm run typecheck --prefix frontend; fi
+	@if [ -d frontend/node_modules ]; then npm run typecheck --prefix frontend && npm test --prefix frontend; fi
 
 ## web-check: the committed build matches the sources (CI)
 web-check: web

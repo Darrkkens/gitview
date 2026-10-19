@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,5 +174,47 @@ func TestGraphScreenAnalyzeExportOpen(t *testing.T) {
 	m.press("esc")
 	if m.screen != screenDiff {
 		t.Error("Esc did not go back")
+	}
+}
+
+// An HTML export embeds the layout gitview serve saved for the repository,
+// a file given with --layout, or none with --no-layout.
+func TestGraphExportEmbedsTheSavedLayout(t *testing.T) {
+	t.Setenv("GITVIEW_CACHE_DIR", t.TempDir())
+	g, err := analyzeRepoGraph(context.Background(), graphFixture, "", io.Discard, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := layoutFile(g.Root)
+	os.MkdirAll(filepath.Dir(path), 0o700)
+	os.WriteFile(path, []byte(`{"layout_version": 1, "views": {"repository": {"nodes": {"saved": {"x": 1, "y": 2}}}}}`), 0o600)
+	given := filepath.Join(t.TempDir(), "given.json")
+	os.WriteFile(given, []byte(`{"layout_version":1,"views":{"repository":{"nodes":{"given":{"x":3,"y":4}}}}}`), 0o644)
+	export := func(args ...string) string {
+		out := filepath.Join(t.TempDir(), "g.html")
+		var stdout, stderr bytes.Buffer
+		if code := runGraph(append(append([]string{"export", "-o", out}, args...), graphFixture), &stdout, &stderr); code != 0 {
+			t.Fatalf("export %v: %d %s", args, code, stderr.String())
+		}
+		data, _ := os.ReadFile(out)
+		var sec struct {
+			Layout json.RawMessage `json:"layout"`
+		}
+		json.Unmarshal(pageSections(t, string(data))["graph"], &sec)
+		return string(sec.Layout)
+	}
+	if got := export(); !strings.Contains(got, `"saved"`) {
+		t.Errorf("default export: layout %q", got)
+	}
+	if got := export("--layout", given); !strings.Contains(got, `"given"`) {
+		t.Errorf("--layout: %q", got)
+	}
+	if got := export("--no-layout"); got != "" {
+		t.Errorf("--no-layout: %q", got)
+	}
+	os.WriteFile(given, []byte(`{"views":{}}`), 0o644)
+	var stderr bytes.Buffer
+	if code := runGraph([]string{"export", "-o", filepath.Join(t.TempDir(), "x.html"), "--layout", given, graphFixture}, io.Discard, &stderr); code == 0 || !strings.Contains(stderr.String(), "layout_version") {
+		t.Errorf("invalid --layout accepted: %d %s", code, stderr.String())
 	}
 }

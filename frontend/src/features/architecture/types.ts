@@ -2,6 +2,9 @@
 // (internal/graph/export/htmldata.go), the model decoded from it, and the
 // scenes the canvas draws.
 
+import type { Algorithm, EdgeStyle } from './layoutDoc'
+import type { Port } from './route'
+
 // ---------- the `graph` section, as written by the Go side ----------
 
 export type Conf = 'confirmed' | 'likely' | 'possible' | 'unresolved'
@@ -149,6 +152,8 @@ export interface GraphSection {
   edges: EdgeTuple[]
   http?: { routes?: RouteRef[] | null } | null
   sources?: SourcesInfo | null
+  /** A layout document embedded by `gitview graph export` (layoutDoc.ts); data, validated before use. */
+  layout?: unknown
 }
 
 /** Code excerpts a security report embeds instead of whole files. */
@@ -257,6 +262,8 @@ export type BoxKind = 'group' | 'node' | 'context' | 'more'
 export interface Box {
   key: string
   ref?: number
+  /** Stable ID of the tree item (positions are saved under it); none for "more" boxes. */
+  id?: string
   kind: BoxKind
   x: number
   y: number
@@ -272,9 +279,26 @@ export interface Box {
   muted?: boolean
   tip?: string
   focusCol?: number
+  /** Card text: kind label, statistics and dependencies lines (sub is the fallback). */
+  kindLabel?: string
+  stats?: string
+  deps?: string
+  /** Key of the group drawn around this box. */
+  parent?: string
+  /** Group: the origin its content is placed from, and the size of its automatic layout from there. */
+  fx?: number
+  fy?: number
+  minW?: number
+  minH?: number
+  /** Placed by the viewer (kept by automatic layouts); locked: not movable. */
+  pinned?: boolean
+  locked?: boolean
   // fitted text, computed by the renderer
   _title?: string
   _sub?: string
+  _stats?: string
+  _deps?: string
+  _kind?: string
 }
 
 /** Relations of the dataset lifted to one pair of drawn items. */
@@ -312,9 +336,18 @@ export interface SceneEdge {
   label?: string
   /** A branch runs from an inner item to its trunk; drawn on demand. */
   branch?: boolean
+  /** Branch: the trunk it joins, and the trunk's end it joins (0: start, 1: end). */
+  trunk?: SceneEdge
+  end?: 0 | 1
+  /** Routed from the cards' rectangles (route.ts) rather than by the layout. */
+  local?: boolean
+  /** Local routes: the ports at each end. */
+  ports?: [Port | null, Port | null]
   /** Drawn items whose relations the line carries. */
   units?: Set<string>
   agg: LineAgg
+  /** Secondary: every relation it carries is weak (possible, unresolved) or a type use. */
+  minor?: boolean
   _bb?: [number, number, number, number]
 }
 
@@ -330,6 +363,9 @@ export interface Scene {
   boxes: Box[]
   edges: SceneEdge[]
   bounds: { x: number; y: number; w: number; h: number }
+  /** How lines are drawn, and the flow's main axis (where local routes prefer to leave). */
+  style: EdgeStyle
+  prefer: 'v' | 'h'
 }
 
 export interface Visible {
@@ -354,6 +390,8 @@ export interface ArchView extends ViewBase {
   kind: 'arch'
   v: Visible
   counts: { boxes: number; groups: number; context: number; edges: number }
+  /** The algorithm asked for, the one used (Hierarchical falls back on large drawings). */
+  layout: { algorithm: Algorithm; used: Algorithm; fellBack: boolean }
 }
 
 export interface FocusView extends ViewBase {
@@ -362,6 +400,7 @@ export interface FocusView extends ViewBase {
   more: Record<number, number>
   symbolMode: boolean
   counts: { boxes: number; callers: number; callees: number; edges: number }
+  layout: { algorithm: Algorithm; used: Algorithm; fellBack: boolean }
 }
 
 export type View = ArchView | FocusView
@@ -376,3 +415,6 @@ export interface Highlight {
   down: number
   up: number
 }
+
+/** Which relations of the selection are highlighted. */
+export type Direction = 'both' | 'out' | 'in'

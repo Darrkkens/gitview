@@ -16,6 +16,7 @@ import {
   type ReactNode,
   type Ref,
 } from 'react'
+import { placeLabel } from '../../../lib/edgeLabel'
 import { cx } from '../../../lib/format'
 import { boundsOf, fitText, font, textWidth } from './layout'
 
@@ -65,10 +66,24 @@ export interface Bounds {
   h: number
 }
 
+/** A band behind the steps of one stage of a flow (Route, Middleware, Handler…), with its name on top. */
+export interface Lane {
+  key: string
+  label: string
+  /** token of the name's square */
+  color: string
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 export interface Scene {
   boxes: Box[]
   edges: Edge[]
   bounds: Bounds
+  /** stages, left to right (the HTTP journey); none for other scenes */
+  lanes?: Lane[]
 }
 
 /** Highlight roles: boxes sel | out | in, edges out | in. */
@@ -158,21 +173,6 @@ function arrowPath(p: number[], size: number): string {
     (ey - uy * ah - ux * ah * 0.45) +
     ' Z'
   )
-}
-
-function midpoint(p: number[]): [number, number] {
-  let total = 0
-  for (let k = 0; k < p.length - 2; k += 2) total += Math.hypot(p[k + 2] - p[k], p[k + 3] - p[k + 1])
-  let half = total / 2
-  for (let k = 0; k < p.length - 2; k += 2) {
-    const l = Math.hypot(p[k + 2] - p[k], p[k + 3] - p[k + 1])
-    if (half <= l) {
-      const f = l ? half / l : 0
-      return [p[k] + (p[k + 2] - p[k]) * f, p[k + 1] + (p[k + 3] - p[k + 1]) * f]
-    }
-    half -= l
-  }
-  return [p[0], p[1]]
 }
 
 const v = (token: string) => 'var(--' + token + ')'
@@ -355,9 +355,10 @@ const SceneLayer = memo(function SceneLayer({
   const edges = scene.edges.map((e) => ({ e, ...strongOf(e) }))
   // weak lines first, the highlighted ones on top
   edges.sort((a, b) => Number(a.strong) - Number(b.strong))
-  // labels of the strong lines, never over each other
+  // labels of the strong lines, never over each other nor over a step
   const labels: { e: Edge; x: number; y: number; w: number }[] = []
   const taken: number[][] = []
+  const covered = scene.boxes.map((b) => [b.x, b.y, b.x + b.w, b.y + b.h])
   const want = (x: (typeof edges)[number]) => {
     if (!x.e.label) return 0
     if (x.e.key === selected || hoverEdge === x.e.key) return 3
@@ -369,15 +370,13 @@ const SceneLayer = memo(function SceneLayer({
     .filter((x) => x[0])
     .sort((a, b) => b[0] - a[0])
     .forEach(([, x]) => {
-      const [mx, my] = midpoint(x.e.pts)
       const w = textWidth(x.e.label!, LABEL()) + 10
-      const r = [mx - w / 2 - 2, my - 10, mx + w / 2 + 2, my + 10]
-      if (taken.some((q) => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) return
-      taken.push(r)
-      labels.push({ e: x.e, x: mx, y: my, w })
+      const at = placeLabel(x.e.pts, w, 16, covered, taken)
+      if (at) labels.push({ e: x.e, x: at[0], y: at[1], w })
     })
   return (
     <>
+      {scene.lanes && <LaneBands lanes={scene.lanes} />}
       <g>
         {edges.map(({ e, role, isHover, strong }) => {
           const color = edgeColor(e, role, e.key === selected, isHover)
@@ -451,6 +450,82 @@ const SceneLayer = memo(function SceneLayer({
     </>
   )
 })
+
+/** Lane bands, every other one tinted, with a rule between them. */
+function LaneBands({ lanes }: { lanes: Lane[] }) {
+  return (
+    <g pointerEvents="none">
+      {lanes.map((l, k) => (
+        <g key={l.key}>
+          {k % 2 === 1 && <rect x={l.x} y={l.y} width={l.w} height={l.h} fill={v('group-fill')} />}
+          {k > 0 && (
+            <line
+              x1={l.x}
+              y1={l.y}
+              x2={l.x}
+              y2={l.y + l.h}
+              stroke={v('group-border')}
+              strokeDasharray="3 5"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </g>
+      ))}
+    </g>
+  )
+}
+
+/**
+ * LaneHeads: the lanes' names in screen space, at a fixed size: on top of
+ * their lane, kept in sight below the overlays (top) while the view scrolls
+ * down the lanes.
+ */
+function LaneHeads({
+  lanes,
+  cam,
+  size,
+  top,
+}: {
+  lanes: Lane[]
+  cam: Cam
+  size: { w: number; h: number }
+  top: number
+}) {
+  const sx = (x: number) => (x - cam.x) * cam.z + size.w / 2
+  const sy = (y: number) => (y - cam.y) * cam.z + size.h / 2
+  const f = font(600, 10.5)
+  return (
+    <g pointerEvents="none" aria-hidden="true">
+      {lanes.map((l) => {
+        const x0 = Math.max(sx(l.x), 0),
+          x1 = Math.min(sx(l.x + l.w), size.w)
+        const y = Math.max(sy(l.y) + 6, top)
+        if (x1 - x0 < 48 || y > sy(l.y + l.h) - 30) return null
+        const text = fitText(l.label.toUpperCase(), f, x1 - x0 - 46)
+        if (!text || text === '…') return null
+        // the letter spacing widens the text by 0.4px a character
+        const w = textWidth(text, f) + text.length * 0.4 + 30
+        return (
+          <g key={l.key} transform={`translate(${x0 + 8} ${y})`}>
+            <rect width={w} height={20} rx={4} fill={v('surface-1')} stroke={v('line')} />
+            <rect x={8} y={6.5} width={7} height={7} rx={1.5} fill={v(l.color)} />
+            <text
+              x={21}
+              y={10.5}
+              dominantBaseline="central"
+              fontSize={10.5}
+              fontWeight={600}
+              letterSpacing={0.4}
+              fill={v('fg-2')}
+            >
+              {text}
+            </text>
+          </g>
+        )
+      })}
+    </g>
+  )
+}
 
 function Minimap({
   scene,
@@ -635,7 +710,12 @@ export function JourneyCanvas({
         const m = fitOpts.minZoom
         const x =
           fitOpts.align === 'left' || fitOpts.align === 'topleft' ? b.x - 60 / m + size.w / 2 / m : b.x + b.w / 2
-        const y = fitOpts.align === 'topleft' ? b.y - (top + 24) / m + size.h / 2 / m : b.y + b.h / 2 - top / 2 / m
+        let y = fitOpts.align === 'topleft' ? b.y - (top + 24) / m + size.h / 2 / m : b.y + b.h / 2 - top / 2 / m
+        if (fitOpts.align === 'left') {
+          // from the drawing's top when the anchor stays in sight, else centred on the anchor
+          const fromTop = bb.y - (top + 8) / m + size.h / 2 / m
+          if (b.y + b.h + 40 / m <= fromTop + size.h / 2 / m) y = fromTop
+        }
         animateTo({ x, y, z: m }, animate)
         return
       }
@@ -865,6 +945,7 @@ export function JourneyCanvas({
             />
           </g>
         )}
+        {scene?.lanes && <LaneHeads lanes={scene.lanes} cam={cam} size={size} top={(fitOpts?.top ?? 0) + 4} />}
       </svg>
       {children}
       {minimap && scene && scene.boxes.length > 0 && size.w >= 560 && size.h >= 360 && (

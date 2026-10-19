@@ -45,6 +45,7 @@ exemplos:
   gitview graph export --level packages         # HTML: abre com todos os pacotes visíveis
   gitview graph export --include-http=false     # sem o catálogo HTTP
   gitview graph export --include-source=false   # HTML sem o código-fonte (aba Source vazia)
+  gitview graph export --layout layout.json     # HTML com as posições dos cards exportadas pela página
   gitview graph routes
   gitview graph routes --format json
   gitview graph journey --route "POST /api/clients" --depth 4
@@ -74,6 +75,8 @@ type graphFlags struct {
 	includeSrc  bool
 	route       string
 	depth       int
+	layout      string
+	noLayout    bool
 }
 
 var exportFormats = map[string]string{"html": "gitview-graph.html", "json": "", "openapi": "", "postman": ""}
@@ -108,6 +111,8 @@ func runGraph(args []string, stdout, stderr io.Writer) int {
 		fs.BoolVar(&f.overwrite, "overwrite", false, "substitui o arquivo de saída se existir")
 		fs.BoolVar(&f.includeHTTP, "include-http", true, "inclui o catálogo HTTP (rotas e contratos) e o HTTP Explorer")
 		fs.BoolVar(&f.includeSrc, "include-source", true, "HTML: embute os arquivos .go do repositório (compactados) para a aba Source")
+		fs.StringVar(&f.layout, "layout", "", "HTML: posições dos cards (JSON exportado pela página); padrão: o layout salvo pelo gitview serve, se houver")
+		fs.BoolVar(&f.noLayout, "no-layout", false, "HTML: sem posições salvas (layout automático)")
 	case "routes":
 		fs.StringVar(&f.format, "format", "text", "text ou json")
 	case "journey":
@@ -191,7 +196,15 @@ func runGraph(args []string, stdout, stderr io.Writer) int {
 	case "postman":
 		err = gexport.Postman(&buf, g)
 	default:
-		err = gexport.HTML(&buf, g, gexport.HTMLOptions{Level: f.level, MaxNodes: f.maxNodes, MaxEdges: f.maxEdges, NoSource: !f.includeSrc})
+		var layout json.RawMessage
+		if layout, err = exportLayout(g.Root, f.layout, f.noLayout); err != nil {
+			fmt.Fprintln(stderr, "gitview graph export: --layout:", err)
+			return 1
+		}
+		if len(layout) > 0 && f.layout == "" {
+			fmt.Fprintln(stderr, "layout salvo pelo gitview serve incluído (--no-layout exporta sem ele)")
+		}
+		err = gexport.HTML(&buf, g, gexport.HTMLOptions{Level: f.level, MaxNodes: f.maxNodes, MaxEdges: f.maxEdges, NoSource: !f.includeSrc, Layout: layout})
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "gitview graph export:", err)

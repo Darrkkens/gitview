@@ -1,10 +1,14 @@
-// HTTP journey: for the selected route, the code it may run, left to right:
-// the route, its handler chain in registration order, then what the chain
-// calls, by call depth. Every step is an edge of the dataset (static
-// analysis): a possible path, not the trace of a request.
+// HTTP journey: for the selected route, the code it may run, left to right
+// in stage lanes: Route → Middleware → Handler → Service → Repository →
+// Database. A step sits in the lane of its own layer (Study Mode's
+// classification) or, without one (a helper, an external call), in the lane
+// of the step that calls it; a lane is drawn only when a step is in it.
+// Every step is an edge of the dataset (static analysis): a possible path,
+// not the trace of a request. A middleware's own calls start collapsed: the
+// path to the handler and beyond is the journey's subject.
 
 import { baseName } from '../../lib/format'
-import type { Box, Edge, Scene } from './journey/Canvas'
+import type { Box, Edge, Lane, Scene } from './journey/Canvas'
 import { boundsOf, font, layoutColumns, textWidth, type LEdge, type LNode } from './journey/layout'
 import { CONF_RANK, FLOW, LAYER_COLOR, REL, kindLabel, layerColor, layerOf, reference, type Graph } from './graph'
 import type { GEdge, GNode } from './types'
@@ -13,6 +17,18 @@ import type { GEdge, GNode } from './types'
 export const PER_COL = 60
 
 export const JOURNEY_RELS = ['calls', 'go', 'defer', 'queries'] as const
+
+/** The lane of each layer: Repository and External API share the data access stage. */
+const STAGE_OF: Record<string, number> = {
+  Route: 0,
+  Middleware: 1,
+  Handler: 2,
+  Service: 3,
+  Repository: 4,
+  'External API': 4,
+  Database: 5,
+}
+const STAGE_LAYERS = [['Route'], ['Middleware'], ['Handler'], ['Service'], ['Repository', 'External API'], ['Database']]
 
 export interface JourneyOpts {
   depth: number
@@ -89,6 +105,7 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
   if (!r || root === undefined || root < 0) return null
   const { N, E } = g
   const col = new Map<number, number>(),
+    stage = new Map<number, number>(),
     depth = new Map<number, number>(),
     more = new Map<number, number>(),
     chainPos = new Map<number, number>(),
@@ -98,6 +115,7 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
     order.push(i)
   }
   place(root, 0)
+  stage.set(root, 0)
   depth.set(root, 0)
   const chain = N[root].out
     .map((ei) => E[ei])
@@ -108,6 +126,7 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
   chain.forEach((e, j) => {
     if (col.has(e.t)) return
     place(e.t, 1)
+    stage.set(e.t, layerOf(N[e.t]) === 'Middleware' ? 1 : 2)
     depth.set(e.t, 1)
     chainPos.set(e.t, j + 1)
     q.push(e.t)
@@ -116,7 +135,8 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
   while (q.length) {
     const i = q.shift()!,
       d = depth.get(i)!
-    const open = o.exp[i] === true || (o.exp[i] !== false && d <= o.depth)
+    const middleware = chainPos.has(i) && stage.get(i) === 1
+    const open = o.exp[i] === true || (o.exp[i] !== false && d <= o.depth && !middleware)
     const callees = N[i].out
       .map((ei) => E[ei])
       .filter((e) => FLOW[e.type] && e.type !== 'handles' && relOk(e, o) && !(N[e.t].ext && !o.ext))
@@ -130,6 +150,7 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
         continue
       }
       place(e.t, c)
+      stage.set(e.t, STAGE_OF[layerOf(N[e.t])] ?? stage.get(i)!)
       depth.set(e.t, d + 1)
       q.push(e.t)
       perCol.set(c, (perCol.get(c) || 0) + 1)
@@ -178,16 +199,22 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
     return { w: Math.round(Math.max(leafWidth(n), Math.min(Math.max(tw, sw), 320))), h: 44 }
   }
   const sizes = new Map(order.map((i) => [i, sizeOf(i)]))
-  const lnodes: LNode[] = order.map((i) => ({ id: 'h' + i, width: sizes.get(i)!.w, height: 44, c: col.get(i)! }))
+  // the lanes are the layout's partitions; inside one, ELK layers by calls
+  // the middlewares keep the chain's order, top to bottom
+  const lnodes: LNode[] = order.map((i) => {
+    const n: LNode = { id: 'h' + i, width: sizes.get(i)!.w, height: 44, c: stage.get(i)! }
+    if (chainPos.has(i) && n.c === 1) n.rank = chainPos.get(i)
+    return n
+  })
   const ledges: LEdge[] = [...agg.values()].map((a) => ({ id: a.key, s: 'h' + a.a, t: 'h' + a.b }))
   const key =
     'http|' +
     r.id +
     '|' +
-    lnodes.map((n) => n.id + ':' + n.c + ':' + n.width).join(',') +
+    lnodes.map((n) => n.id + ':' + n.c + ':' + n.width + (n.rank ? '#' + n.rank : '')).join(',') +
     '|' +
     ledges.map((e) => e.id).join(',')
-  const res = await layoutColumns(key, lnodes, ledges, 'RIGHT', 1.6)
+  const res = await layoutColumns(key, lnodes, ledges, 'RIGHT', 1.6, 'NETWORK_SIMPLEX')
   const layers: Record<string, number> = {}
   const boxes: Box[] = order.map((i) => {
     const n = N[i],
@@ -241,10 +268,11 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
   })
   let hidden = 0
   more.forEach((n) => (hidden += n))
+  const lanes = lanesOf(order.map((i) => [stage.get(i)!, byKey.get('h' + i)!, layerOf(N[i])]))
   return {
     route: k,
     root,
-    scene: { boxes, edges, bounds: boundsOf(boxes) },
+    scene: { boxes, edges, lanes, bounds: boundsOf([...boxes, ...lanes]) },
     edges,
     more,
     chainPos,
@@ -253,4 +281,49 @@ export async function buildJourney(g: Graph, k: number, o: JourneyOpts): Promise
     keyOf: (i: number) => (col.has(i) ? 'h' + i : null),
     ms: res.ms,
   }
+}
+
+/** Room above the steps for a lane's name, and around them. */
+const LANE_HEAD = 40,
+  LANE_PAD = 22
+
+/**
+ * lanesOf: the band of each stage holding a step, from the steps' boxes
+ * ([stage, box, own layer]). Neighbouring bands meet halfway between their
+ * steps; every band spans the whole drawing's height. A stage's name is its
+ * layer (the layers present, for the data access stage).
+ */
+function lanesOf(steps: [number, Box, string][]): Lane[] {
+  if (!steps.length) return []
+  const by = new Map<number, { x0: number; x1: number; layers: Set<string> }>()
+  let y0 = Infinity,
+    y1 = -Infinity
+  for (const [s, b, layer] of steps) {
+    let l = by.get(s)
+    if (!l) by.set(s, (l = { x0: Infinity, x1: -Infinity, layers: new Set() }))
+    l.x0 = Math.min(l.x0, b.x)
+    l.x1 = Math.max(l.x1, b.x + b.w)
+    if (STAGE_OF[layer] === s) l.layers.add(layer)
+    y0 = Math.min(y0, b.y)
+    y1 = Math.max(y1, b.y + b.h)
+  }
+  const keys = [...by.keys()].sort((a, b) => a - b)
+  return keys.map((s, j) => {
+    const l = by.get(s)!
+    const prev = j > 0 ? by.get(keys[j - 1])! : null,
+      next = j < keys.length - 1 ? by.get(keys[j + 1])! : null
+    const x0 = prev ? (prev.x1 + l.x0) / 2 : l.x0 - LANE_PAD,
+      x1 = next ? (l.x1 + next.x0) / 2 : l.x1 + LANE_PAD
+    const names = STAGE_LAYERS[s].filter((x) => l.layers.has(x))
+    const name = names.length ? names.join(' · ') : STAGE_LAYERS[s][0]
+    return {
+      key: 'lane' + s,
+      label: name === 'Handler' ? 'Handler (controller)' : name,
+      color: LAYER_COLOR[names[0] ?? STAGE_LAYERS[s][0]] ?? 'k-group',
+      x: x0,
+      y: y0 - LANE_HEAD,
+      w: x1 - x0,
+      h: y1 - y0 + LANE_HEAD + LANE_PAD,
+    }
+  })
 }

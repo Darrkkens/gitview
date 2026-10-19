@@ -25,6 +25,9 @@ type HTMLOptions struct {
 	// Live is set when the page is served locally: the page may then call
 	// that server (and only it) with the token.
 	Live *webui.Live
+	// Layout is a layout document (ParseLayout) the page opens with: the
+	// card positions saved by gitview serve or exported from the page.
+	Layout json.RawMessage
 }
 
 // GraphSection returns the page's graph section (the compact dataset the
@@ -46,6 +49,9 @@ func GraphSection(g *model.Graph, opt HTMLOptions) (map[string]any, SourceBundle
 		}
 	}
 	c["sources"] = map[string]any{"embedded": src.Encoded != "", "files": src.Files, "bytes": src.Bytes, "skipped": src.Skipped, "disabled": opt.NoSource}
+	if len(opt.Layout) > 0 {
+		c["layout"] = opt.Layout
+	}
 	return c, src, nil
 }
 

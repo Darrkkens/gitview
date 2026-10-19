@@ -10,8 +10,11 @@ import { useTheme } from '../../lib/theme'
 import { filtersChanged, type Explorer, type Snapshot } from './controller'
 import { FiltersPanel } from './FiltersPanel'
 import { PER_COL } from './focus'
+import { LayoutPanel } from './LayoutPanel'
+import { useStore } from './saveState'
 import type { Model } from './model'
 import { Renderer } from './renderer'
+import { ScaleBar, SelectionBar } from './SelectionBar'
 import { Glyph, LineSample, Seg, type GlyphName } from './ui'
 import { CONFS, TYPE } from './vocab'
 
@@ -24,6 +27,8 @@ export interface StageProps {
   onFullscreen: () => void
   filtersOpen: boolean
   setFiltersOpen: (v: boolean) => void
+  layoutOpen: boolean
+  setLayoutOpen: (v: boolean) => void
   sidebar: boolean
   inspector: boolean
   onSidebar: () => void
@@ -31,12 +36,14 @@ export interface StageProps {
 }
 
 export function Stage(props: StageProps) {
-  const { D, ctrl, snap, minimap, filtersOpen, setFiltersOpen } = props
+  const { D, ctrl, snap, minimap, filtersOpen, setFiltersOpen, layoutOpen, setLayoutOpen } = props
   const canvas = useRef<HTMLCanvasElement>(null)
   const mini = useRef<HTMLCanvasElement>(null)
   const renderer = useRef<Renderer | null>(null)
   const filtersBtn = useRef<HTMLButtonElement>(null)
+  const layoutBtn = useRef<HTMLButtonElement>(null)
   const [theme] = useTheme()
+  const st = useStore(ctrl.store)
 
   useEffect(() => {
     if (!canvas.current || !mini.current) return
@@ -67,6 +74,7 @@ export function Stage(props: StageProps) {
   }, [ctrl])
 
   const closeFilters = useCallback(() => setFiltersOpen(false), [setFiltersOpen])
+  const closeLayout = useCallback(() => setLayoutOpen(false), [setLayoutOpen])
   const hasBoxes = !!snap.view?.scene.boxes.length
   const changed = filtersChanged(snap.S.filters)
 
@@ -76,7 +84,7 @@ export function Stage(props: StageProps) {
         ref={canvas}
         tabIndex={0}
         className="absolute inset-0 block size-full touch-none outline-none"
-        aria-label="Architecture diagram. Use the explorer, the search or the inspector to navigate it with the keyboard."
+        aria-label="Architecture diagram: drag a card to move it, drag the background to pan, Shift+drag to select several. Use the explorer, the search or the inspector to navigate it with the keyboard."
       />
 
       <div className="pointer-events-none absolute top-2.5 right-14 left-3 z-[5] flex flex-col gap-1.5">
@@ -92,7 +100,11 @@ export function Stage(props: StageProps) {
               <Glyph name="sidebar" className="size-3.5" />
             </button>
           )}
+          <ScaleBar ctrl={ctrl} snap={snap} />
           <ViewBar {...props} />
+        </div>
+        <div className="flex min-w-0 *:pointer-events-auto">
+          <SelectionBar D={D} ctrl={ctrl} snap={snap} />
         </div>
       </div>
 
@@ -109,7 +121,32 @@ export function Stage(props: StageProps) {
         )}
         <ToolButton icon="plus" title="Zoom in (+)" onClick={() => ctrl.zoomBy(1.25)} />
         <ToolButton icon="minus" title="Zoom out (−)" onClick={() => ctrl.zoomBy(0.8)} />
-        <ToolButton glyph="fit" title="Fit view (f)" onClick={() => ctrl.fitView()} />
+        <ToolButton glyph="fit" title="Zoom to fit everything (f)" onClick={() => ctrl.zoomToFit()} />
+        <ToolButton glyph="reset" title="Reset the view: readable, from the top left (0)" onClick={() => ctrl.fitView()} />
+        <Sep />
+        <ToolButton
+          ref={layoutBtn}
+          glyph="layout"
+          title="Layout: algorithm, lines, save, import"
+          pressed={layoutOpen}
+          onClick={() => {
+            setFiltersOpen(false)
+            setLayoutOpen(!layoutOpen)
+          }}
+          dot={snap.layout.positions > 0 || snap.layout.algorithm !== 'grouped'}
+        />
+        <ToolButton
+          glyph="undo"
+          title={'Undo' + (st.undo ? ': ' + st.undo : '') + ' (Ctrl+Z)'}
+          disabled={!st.undo}
+          onClick={() => ctrl.undo()}
+        />
+        <ToolButton
+          glyph="redo"
+          title={'Redo' + (st.redo ? ': ' + st.redo : '') + ' (Ctrl+Shift+Z)'}
+          disabled={!st.redo}
+          onClick={() => ctrl.redo()}
+        />
         <Sep />
         <ToolButton
           glyph="focus"
@@ -125,10 +162,15 @@ export function Stage(props: StageProps) {
           icon="filter"
           title="Filters (element and relation types, confidence)"
           pressed={filtersOpen}
-          onClick={() => setFiltersOpen(!filtersOpen)}
-          dot={changed}
+          onClick={() => {
+            setLayoutOpen(false)
+            setFiltersOpen(!filtersOpen)
+          }}
+          dot={changed || snap.S.hideMinor || snap.S.direction !== 'both'}
         />
       </div>
+
+      {layoutOpen && <LayoutPanel ctrl={ctrl} snap={snap} anchor={layoutBtn} onClose={closeLayout} />}
 
       {filtersOpen && (
         <FiltersPanel
@@ -136,6 +178,7 @@ export function Stage(props: StageProps) {
           ctrl={ctrl}
           filters={snap.S.filters}
           pathDepth={snap.S.pathDepth}
+          S={snap.S}
           anchor={filtersBtn}
           onClose={closeFilters}
         />
@@ -167,6 +210,7 @@ function ToolButton({
   onClick,
   pressed,
   dot,
+  disabled,
   ref,
 }: {
   icon?: 'plus' | 'minus' | 'filter'
@@ -175,6 +219,7 @@ function ToolButton({
   onClick: () => void
   pressed?: boolean
   dot?: boolean
+  disabled?: boolean
   ref?: React.Ref<HTMLButtonElement>
 }) {
   return (
@@ -182,8 +227,9 @@ function ToolButton({
       ref={ref}
       type="button"
       title={title}
-      aria-label={title.replace(/ \(.*\)$/, '')}
+      aria-label={title.replace(/ \(.*\)$/, '').replace(/:.*$/, '')}
       aria-pressed={pressed}
+      disabled={disabled}
       className={cx(
         'btn btn-ghost btn-sm btn-square relative size-7 min-h-0',
         pressed && 'bg-accent-weak text-accent-text',
