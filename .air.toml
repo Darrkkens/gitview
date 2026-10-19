@@ -1,0 +1,18 @@
+# make watch: rebuilds gitview and restarts `gitview serve` on Go changes.
+# The web UI is embedded from frontend/dist; for UI work use `make dev`.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/gitview ./cmd/gitview"
+  entrypoint = ["./tmp/gitview", "serve", "--open=false", "--port", "7777", "."]
+  include_ext = ["go", "html"]
+  exclude_dir = ["tmp", "frontend/node_modules", "frontend/src", "docs", ".git"]
+  exclude_regex = ["_test\\.go$", "testdata"]
+  delay = 500
+  kill_delay = "1s"
+  send_interrupt = true
+  stop_on_error = true
+
+[misc]
+  clean_on_exit = true

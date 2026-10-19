@@ -1,0 +1,221 @@
+/* Diff tables of the Changes view. Plain CSS (not utilities) because a diff
+   can have thousands of rows: short class names keep the DOM light. Colours
+   come from the theme tokens of styles/global.css, so both themes work. */
+
+.gd-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 100%;
+  font-size: 12px;
+  line-height: 20px;
+  tab-size: 4;
+  -moz-tab-size: 4;
+}
+.gd-table td {
+  padding: 0;
+  vertical-align: top;
+}
+.gd-ln {
+  position: sticky;
+  z-index: 1;
+  width: calc(var(--gd-d, 3) * 1ch + 18px);
+  min-width: calc(var(--gd-d, 3) * 1ch + 18px);
+  padding: 0 9px !important;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--code-gutter);
+  background: var(--code-bg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.gd-ln.gd-o {
+  left: 0;
+}
+.gd-ln.gd-n {
+  left: calc(var(--gd-d, 3) * 1ch + 18px);
+  border-right: 1px solid var(--line);
+}
+.gd-ln.gd-n.gd-link {
+  cursor: pointer;
+}
+.gd-ln.gd-n.gd-link:hover {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.gd-sg {
+  width: calc(1ch + 14px);
+  padding: 0 4px 0 10px !important;
+  color: var(--fg-3);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.gd-cd {
+  padding: 0 16px 0 2px !important;
+  white-space: pre;
+  color: var(--fg);
+}
+.gd-cd.gd-wrap {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+tr.gd-add .gd-ln {
+  background: linear-gradient(var(--diff-add-strong), var(--diff-add-strong)), var(--code-bg);
+  color: var(--color-success);
+}
+tr.gd-del .gd-ln {
+  background: linear-gradient(var(--diff-del-strong), var(--diff-del-strong)), var(--code-bg);
+  color: var(--color-error);
+}
+tr.gd-add .gd-sg,
+tr.gd-add .gd-cd {
+  background: var(--diff-add);
+}
+tr.gd-del .gd-sg,
+tr.gd-del .gd-cd {
+  background: var(--diff-del);
+}
+tr.gd-add .gd-sg {
+  color: var(--color-success);
+}
+tr.gd-del .gd-sg {
+  color: var(--color-error);
+}
+
+/* Target of a deep link: a lasting marker plus a short flash. */
+tr.gd-target td {
+  box-shadow: inset 0 0 0 9999px var(--code-line-hl);
+}
+tr.gd-target .gd-ln.gd-n {
+  color: var(--accent-text);
+  box-shadow:
+    inset -2px 0 0 var(--color-primary),
+    inset 0 0 0 9999px var(--accent-weak);
+}
+tr.gd-flash td {
+  animation: gd-flash 1.6s ease-out;
+}
+@keyframes gd-flash {
+  0%,
+  35% {
+    box-shadow: inset 0 0 0 9999px var(--accent-weak);
+  }
+}
+
+/* Hunk headers. */
+tr.gd-hh td {
+  height: 26px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(var(--accent-weak), var(--accent-weak)), var(--code-bg);
+  color: var(--fg-2);
+  vertical-align: middle;
+}
+tbody:first-of-type > tr.gd-hh:first-child td {
+  border-top: 0;
+}
+.gd-hc {
+  padding-left: 10px !important;
+  white-space: nowrap;
+}
+.gd-range {
+  color: var(--fg-3);
+}
+.gd-sec {
+  margin-left: 0.6em;
+  color: var(--fg-2);
+}
+.gd-copy {
+  margin-left: 10px;
+  opacity: 0;
+}
+tr.gd-hh:hover .gd-copy,
+.gd-copy:focus-visible,
+.gd-copy:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .gd-copy {
+    opacity: 1;
+  }
+}
+
+/* Long line affordance. */
+.gd-more {
+  margin-left: 0.75em;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--accent-text);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.gd-more:hover {
+  border-color: var(--color-primary);
+}
+
+/* Chunks not mounted yet: a faint code-like texture of the right height. */
+.gd-ph {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 7px,
+    var(--line) 7px,
+    var(--line) 9px,
+    transparent 9px,
+    transparent 20px
+  );
+  background-size: 40% 20px;
+  background-repeat: repeat-y;
+  background-position: calc(var(--gd-d, 3) * 2ch + 72px) 0;
+  opacity: 0.35;
+}
+
+/* The file header is sticky below the toolbar of the view. */
+.gd-head {
+  top: var(--gd-top, 0px);
+}
+.gd-file.gd-current > .gd-head {
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+@media print {
+  .gd-ln {
+    position: static;
+  }
+  /* Gradients make Chromium's PDF output crawl (minutes for a large diff):
+     on paper the page is white, so translucent colours give the same look. */
+  tr.gd-add .gd-ln {
+    background: var(--diff-add-strong);
+  }
+  tr.gd-del .gd-ln {
+    background: var(--diff-del-strong);
+  }
+  tr.gd-hh td {
+    background: var(--accent-weak);
+  }
+  .gd-cd,
+  .gd-hc {
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .gd-head {
+    position: static !important;
+  }
+  .gd-scroll {
+    overflow: visible !important;
+  }
+  tr {
+    break-inside: avoid;
+  }
+  .gd-copy,
+  .gd-more {
+    display: none !important;
+  }
+}

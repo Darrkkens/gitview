@@ -1,0 +1,168 @@
+/* The Code Flow canvas (SVG). Colours come from the theme tokens of
+   styles/global.css: node kinds (k-*), edges, highlight, canvas. */
+
+.gf-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.gf-svg.gf-panning {
+  cursor: grabbing;
+}
+
+.gf-node {
+  cursor: pointer;
+  outline: none;
+}
+.gf-box {
+  fill: var(--node-fill);
+  stroke: var(--node-border);
+  stroke-width: 1;
+}
+.gf-node:hover .gf-box {
+  fill: var(--node-fill-hover);
+}
+.gf-bar {
+  fill: var(--k-func);
+}
+.gf-k-closure .gf-bar {
+  fill: var(--k-group);
+}
+.gf-k-route .gf-bar {
+  fill: var(--k-route);
+}
+.gf-k-route .gf-box {
+  fill: color-mix(in srgb, var(--k-route) 9%, var(--node-fill));
+}
+.gf-k-db .gf-bar {
+  fill: var(--k-db);
+}
+.gf-k-external .gf-bar {
+  fill: var(--k-external);
+}
+.gf-k-external .gf-t1 {
+  fill: var(--fg-2);
+}
+.gf-k-unresolved .gf-bar {
+  fill: var(--k-unresolved);
+}
+.gf-k-unresolved .gf-box {
+  stroke: var(--k-unresolved);
+  stroke-dasharray: 3 3;
+}
+.gf-node text {
+  pointer-events: none;
+}
+.gf-t1 {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--fg);
+}
+.gf-t2 {
+  font-size: 10.5px;
+  fill: var(--fg-3);
+}
+.gf-node.gf-root .gf-box {
+  stroke: var(--color-primary);
+  stroke-width: 2;
+}
+.gf-node.gf-sel .gf-box {
+  stroke: var(--fg);
+  stroke-width: 2;
+}
+.gf-node:focus-visible .gf-box {
+  stroke: var(--color-primary);
+  stroke-width: 2.5;
+}
+.gf-node.gf-dim {
+  opacity: 0.28;
+}
+.gf-node.gf-hit .gf-box {
+  stroke: var(--hl-in);
+  stroke-width: 2;
+}
+.gf-chg {
+  fill: var(--color-primary);
+}
+.gf-tog {
+  cursor: pointer;
+}
+.gf-tog circle {
+  fill: var(--canvas);
+  stroke: var(--line-strong);
+}
+.gf-tog text {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--fg-2);
+  text-anchor: middle;
+}
+.gf-tog:hover circle {
+  stroke: var(--color-primary);
+}
+
+.gf-edge {
+  fill: none;
+  stroke: var(--edge-strong);
+  stroke-width: 1.3;
+}
+.gf-c-likely {
+  stroke-dasharray: 6 3;
+}
+.gf-c-possible {
+  stroke: var(--edge);
+  stroke-dasharray: 3 3;
+}
+.gf-c-unresolved {
+  stroke: var(--c-unresolved);
+  stroke-dasharray: 1.5 3;
+}
+.gf-edge.gf-on {
+  stroke: var(--hl-out);
+  stroke-width: 2.2;
+}
+.gf-edge.gf-dim {
+  opacity: 0.2;
+}
+.gf-elabel {
+  font-size: 10px;
+  fill: var(--fg-2);
+  paint-order: stroke;
+  stroke: var(--canvas);
+  stroke-width: 3px;
+}
+.gf-m-def {
+  fill: var(--edge-strong);
+}
+.gf-m-poss {
+  fill: var(--edge);
+}
+.gf-m-unres {
+  fill: var(--c-unresolved);
+}
+.gf-m-path {
+  fill: var(--hl-out);
+}
+
+/* Legend swatches. */
+.gf-swatch {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  margin-right: 4px;
+  vertical-align: middle;
+  border-top: 2px solid var(--edge-strong);
+}
+.gf-swatch.gf-likely {
+  border-top-style: dashed;
+}
+.gf-swatch.gf-possible {
+  border-top: 2px dashed var(--edge);
+}
+.gf-swatch.gf-unresolved {
+  border-top: 2px dotted var(--c-unresolved);
+}

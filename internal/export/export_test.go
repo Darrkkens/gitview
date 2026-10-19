@@ -1,6 +1,8 @@
 package export
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	stdhtml "html"
@@ -59,19 +61,55 @@ func renderHTMLString(t *testing.T, r Report) string {
 	return string(out)
 }
 
+// pageSection decodes one section of a page's envelope into v.
+func pageSection(t *testing.T, page, name string, v any) {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)<script type="application/json" id="gitview-data">(.*?)</script>`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("no data block")
+	}
+	var env struct {
+		Sections map[string]json.RawMessage `json:"sections"`
+	}
+	if err := json.Unmarshal([]byte(m[1]), &env); err != nil {
+		t.Fatalf("data block is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(env.Sections[name], v); err != nil {
+		t.Fatalf("section %s: %v", name, err)
+	}
+}
+
+func reportOf(t *testing.T, r Report) (ReportSection, string) {
+	t.Helper()
+	page := renderHTMLString(t, r)
+	var s ReportSection
+	pageSection(t, page, "report", &s)
+	return s, page
+}
+
+func spanText(spans []Span) string {
+	var b strings.Builder
+	for _, s := range spans {
+		b.WriteString(s.Text)
+	}
+	return b.String()
+}
+
 func TestHTMLEscaping(t *testing.T) {
 	r := sampleReport(t)
 	r.Files[0].Path = `svc/"><img src=x onerror=alert(1)>.go`
-	html := renderHTMLString(t, r)
+	s, page := reportOf(t, r)
 	for _, bad := range []string{"<script>alert", "feat/<x>", "<img src=x", `"><img`} {
-		if strings.Contains(html, bad) {
+		if strings.Contains(page, bad) {
 			t.Fatalf("unescaped content %q in HTML", bad)
 		}
 	}
-	for _, want := range []string{"&lt;script&gt;", "feat/&lt;x&gt;", "🚀", "&lt;img src=x onerror=alert(1)&gt;"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("html missing %q", want)
-		}
+	// The data round-trips exactly: escaping is only the JSON encoding.
+	if s.Branch != "feat/<x>" || s.Files[0].Path != r.Files[0].Path {
+		t.Errorf("branch %q, path %q", s.Branch, s.Files[0].Path)
+	}
+	if got := spanText(s.Files[0].Hunks[0].Lines[2].Spans); got != "// novo: <script>alert(\"x\")</script> & ü 🚀" {
+		t.Errorf("line text %q", got)
 	}
 }
 
@@ -79,44 +117,57 @@ func TestHTMLStandaloneAndCSP(t *testing.T) {
 	html := renderHTMLString(t, sampleReport(t))
 	// The SVG namespace URI is an identifier, not a resource.
 	scan := strings.ReplaceAll(html, `"http://www.w3.org/2000/svg"`, "")
-	for _, ext := range []string{"http://", "https://", "<link", "@import", "src=\""} {
+	scan = strings.ReplaceAll(scan, `'http://www.w3.org/2000/svg'`, "")
+	for _, ext := range []string{`src="http`, `href="http`, "@import", "url(http"} {
 		if strings.Contains(scan, ext) {
 			t.Errorf("report must be standalone, found %q", ext)
 		}
 	}
 	// Every inline script must be allowed by hash, and no other script may exist.
-	scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(html, -1)
-	if len(scripts) != 3 {
-		t.Fatalf("expected 3 scripts, got %d", len(scripts))
+	scripts := regexp.MustCompile(`(?s)<script type="module"[^>]*>(.*?)</script>`).FindAllStringSubmatch(html, -1)
+	if len(scripts) != 1 || strings.Count(html, "</script>") != 2 { // the app and the data block
+		t.Fatalf("expected the app script and one data block, got %d / %d", len(scripts), strings.Count(html, "</script>"))
 	}
 	csp := stdhtml.UnescapeString(regexp.MustCompile(`http-equiv="Content-Security-Policy" content="([^"]*)"`).FindStringSubmatch(html)[1])
-	for _, s := range scripts {
-		if h := scriptHash(s[1]); !strings.Contains(csp, "'"+h+"'") {
-			t.Errorf("script hash %s missing from CSP", h)
-		}
+	if h := "sha256-" + scriptHashB64(scripts[0][1]); !strings.Contains(csp, "'"+h+"'") {
+		t.Errorf("script hash %s missing from CSP", h)
 	}
-	if !strings.HasPrefix(csp, "default-src 'none';") {
+	if !strings.HasPrefix(csp, "default-src 'none';") || strings.Contains(csp, "connect-src") {
 		t.Error("CSP must block network access")
 	}
 }
 
 func TestHTMLStructure(t *testing.T) {
-	html := stdhtml.UnescapeString(renderHTMLString(t, sampleReport(t)))
-	for _, want := range []string{
-		`<nav class="tabs"`, `href="#overview"`, `href="#files"`, `href="#tests"`,
-		`<a class="frow" role="listitem" href="#file-1" data-path="svc/ação.go">`,
-		`<details class="file" id="file-1" data-path="svc/ação.go" open>`,
-		`data-action="copy-path" data-path="svc/ação.go"`, `data-action="copy-hunk"`,
-		`data-action="expand-all"`, `data-action="theme"`, `id="file-filter"`,
-		`<span class="range">@@ -1,2 +1,3 @@</span> <span class="section">package svc</span>`,
-		"Binary file not shown.", "Tests were not run in this session.", "Tests not run",
-		"<b>2</b> files changed", "<b>2</b> additions", "<b>1</b> deletion<",
-		"@media print", "@media screen and (max-width:760px)",
-		`:root[data-theme="light"] .cd .k`, `:root[data-theme="dark"] .cd .k`,
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("html missing %q", want)
-		}
+	s, page := reportOf(t, sampleReport(t))
+	if !strings.Contains(page, "<title>GitView · gitview · Todos os arquivos</title>") {
+		t.Error("title")
+	}
+	if len(s.Files) != 2 || s.Added != 2 || s.Deleted != 1 {
+		t.Fatalf("files %d, +%d -%d", len(s.Files), s.Added, s.Deleted)
+	}
+	f := s.Files[0]
+	if f.ID != "file-1" || f.Path != "svc/ação.go" || f.Status != "M" || f.StatusName != "Modified" || !f.Open {
+		t.Errorf("file %+v", f)
+	}
+	if h := f.Hunks[0]; h.Range != "@@ -1,2 +1,3 @@" || h.Section != "package svc" {
+		t.Errorf("hunk %q %q", h.Range, h.Section)
+	}
+	if b := s.Files[1]; !b.Binary || b.Status != "A" || len(b.Hunks) != 0 {
+		t.Errorf("binary %+v", b)
+	}
+	if s.Tests == nil || s.Tests.Ran {
+		t.Error("a session without a test run reports ran=false")
+	}
+	if s.Flow != nil || s.Inspect != nil || s.Study != nil {
+		t.Error("sections that were not requested must be absent")
+	}
+	// Chroma classes for the page's palette.
+	var classes []string
+	for _, sp := range f.Hunks[0].Lines[0].Spans {
+		classes = append(classes, sp.Class)
+	}
+	if !strings.Contains(strings.Join(classes, " "), "k") {
+		t.Errorf("Go keywords are not classified: %v", classes)
 	}
 }
 
@@ -125,26 +176,28 @@ func TestHTMLDiffLines(t *testing.T) {
 	tabbed := "@@ -1,2 +1,3 @@\n \tkeep\n-\told\n+\t\tnew  trailing  \n+\n"
 	hunks, _ := gitdiff.Parse(tabbed)
 	r.Files = []gitdiff.File{{Path: "a.go", Status: "M", Added: 2, Deleted: 1, Hunks: hunks}}
-	html := strings.ReplaceAll(renderHTMLString(t, r), "&#43;", "+")
-	rowRe := regexp.MustCompile(`<tr class="l ([a-z ]+)"(?: id="[^"]+")?><td class="ln old">(\d*)</td><td class="ln new">(\d*)</td><td class="sg">(.)</td><td class="cd">(.*?)</td></tr>`)
-	rows := rowRe.FindAllStringSubmatch(html, -1)
-	if len(rows) != 4 {
-		t.Fatalf("rows = %d", len(rows))
+	s, _ := reportOf(t, r)
+	lines := s.Files[0].Hunks[0].Lines
+	if len(lines) != 4 {
+		t.Fatalf("lines = %d", len(lines))
 	}
-	strip := regexp.MustCompile(`<[^>]+>`)
-	want := [][4]string{
-		{"ctx", "1", "1", "\tkeep"},
-		{"del", "2", "", "\told"},
-		{"add", "", "2", "\t\tnew  trailing  "},
-		{"add empty", "", "3", ""},
+	want := []struct {
+		kind     string
+		old, new int
+		text     string
+	}{
+		{"ctx", 1, 1, "\tkeep"},
+		{"del", 2, 0, "\told"},
+		{"add", 0, 2, "\t\tnew  trailing  "},
+		{"add", 0, 3, ""},
 	}
 	for i, w := range want {
-		got := rows[i]
-		if got[1] != w[0] || got[2] != w[1] || got[3] != w[2] {
-			t.Errorf("row %d = kind %q old %q new %q, want %v", i, got[1], got[2], got[3], w)
+		got := lines[i]
+		if got.Kind != w.kind || got.Old != w.old || got.New != w.new {
+			t.Errorf("line %d = %s %d %d, want %v", i, got.Kind, got.Old, got.New, w)
 		}
-		if text := stdhtml.UnescapeString(strip.ReplaceAllString(got[5], "")); text != w[3] {
-			t.Errorf("row %d text %q, want %q (whitespace must be preserved)", i, text, w[3])
+		if text := spanText(got.Spans); text != w.text {
+			t.Errorf("line %d text %q, want %q (whitespace must be preserved)", i, text, w.text)
 		}
 	}
 }
@@ -153,35 +206,18 @@ func TestHTMLTests(t *testing.T) {
 	r := sampleReport(t)
 	r.Tests = &TestReport{
 		Ran: true, Status: "failed", Structured: true, Passed: 1, Failed: 1, ExitCode: 1,
-		Started: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC), Finished: time.Date(2026, 10, 14, 12, 0, 2, 0, time.UTC),
 		Commands: []TestCommand{{Line: "go test -json ./...", Dir: "backend"}},
 		Cases: []TestCase{
-			{Kind: "test", Package: "example.com/auth", Name: "TestToken", Status: "passed", ElapsedMs: 24},
-			{Kind: "test", Package: "example.com/auth", Name: "TestAuthentication", Status: "failed", ElapsedMs: 42, Output: "Expected: 200\nReceived: <401>"},
-			{Kind: "package", Package: "example.com/broken", Name: "(falha de compilação)", Status: "failed", Output: "x.go:1: syntax error"},
+			{Kind: "test", Package: "example.com/auth", Name: "TestAuthentication", Status: "failed", ElapsedMs: 42, Output: "Received: <401>"},
 		},
-		Log: []string{"line <1>", "line 2"}, LogTotal: 10,
+		Log: []string{"line <1>"}, LogTotal: 10,
 	}
-	html := renderHTMLString(t, r)
-	for _, want := range []string{
-		`<span class="ok-text">1 passed</span>`, `<span class="bad-text">1 failed</span>`,
-		"Tests failed", "go test -json ./...", "in backend", "2s",
-		`<span class="tname mono">TestToken</span>`, "24 ms",
-		`Build failed <span class="tag">package result</span>`,
-		"Received: &lt;401&gt;", "Full log", "2 lines, last of 10", "line &lt;1&gt;",
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("tests section missing %q", want)
-		}
+	s, page := reportOf(t, r)
+	if s.Tests == nil || s.Tests.Failed != 1 || s.Tests.Commands[0].Line != "go test -json ./..." || s.Tests.Cases[0].Output != "Received: <401>" || s.Tests.LogTotal != 10 {
+		t.Errorf("tests %+v", s.Tests)
 	}
-	if strings.Contains(html, `<span class="tname mono">(falha de compilação)</span>`) {
-		t.Error("package-level result rendered as an individual test")
-	}
-
-	r.Tests = &TestReport{Ran: true, Status: "failed", Structured: false, ExitCode: 3}
-	html = renderHTMLString(t, r)
-	if !strings.Contains(html, "exit code 3") || !strings.Contains(html, "individual test results are not available") {
-		t.Error("unstructured run must not show individual results")
+	if strings.Contains(page, "<401>") {
+		t.Error("test output not escaped in the page")
 	}
 }
 
@@ -194,11 +230,12 @@ func TestHTMLLargeFilesStartCollapsed(t *testing.T) {
 	hunks, _ := gitdiff.Parse(b.String())
 	r := sampleReport(t)
 	r.Files = append(r.Files, gitdiff.File{Path: "big.txt", Status: "A", Added: 1000, Hunks: hunks})
-	html := renderHTMLString(t, r)
-	if !strings.Contains(html, `id="file-3" data-path="big.txt">`) {
+	s, _ := reportOf(t, r)
+	big := s.Files[2]
+	if big.ID != "file-3" || big.Open {
 		t.Error("large file should start collapsed")
 	}
-	if strings.Count(html, `<tr class="l add`) < 1000 {
+	if big.LineCount != 1000 || len(big.Hunks[0].Lines) != 1000 {
 		t.Error("collapsed files must still contain their full diff")
 	}
 }
@@ -208,20 +245,6 @@ func TestHTMLDeterministic(t *testing.T) {
 	b := renderHTMLString(t, sampleReport(t))
 	if a != b {
 		t.Fatal("same report must render identically")
-	}
-}
-
-func TestDiffstatBar(t *testing.T) {
-	for _, c := range []struct {
-		add, del int
-		want     string
-	}{
-		{0, 0, "none none none none none"}, {10, 0, "add add add add add"}, {1, 1, "add del none none none"},
-		{100, 1, "add add add add del"}, {3, 7, "add add del del del"},
-	} {
-		if got := strings.Join(diffstatBar(c.add, c.del), " "); got != c.want {
-			t.Errorf("bar(%d,%d) = %s, want %s", c.add, c.del, got, c.want)
-		}
 	}
 }
 
@@ -340,5 +363,24 @@ func TestWriteFileFailure(t *testing.T) {
 		if err := WriteFile(filepath.Join(ro, "r.md"), []byte("x"), false); err == nil {
 			t.Fatal("expected error writing into read-only directory")
 		}
+	}
+}
+
+func scriptHashB64(js string) string {
+	sum := sha256.Sum256([]byte(js))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// Minified lines stay plain text: highlighting them token by token would
+// multiply the page's size.
+func TestLongLinesAreNotHighlighted(t *testing.T) {
+	long := strings.Repeat("a=1;", 1000)
+	hunks, _ := gitdiff.Parse("@@ -0,0 +1,2 @@\n+" + long + "\n+package x\n")
+	r := sampleReport(t)
+	r.Files = []gitdiff.File{{Path: "dist/app.js", Status: "A", Added: 2, Hunks: hunks}}
+	s, _ := reportOf(t, r)
+	lines := s.Files[0].Hunks[0].Lines
+	if len(lines[0].Spans) != 1 || lines[0].Spans[0].Class != "" || lines[0].Spans[0].Text != long {
+		t.Errorf("long line: %d spans", len(lines[0].Spans))
 	}
 }

@@ -2,11 +2,7 @@ package export
 
 import (
 	"bytes"
-	"encoding/json"
 	"html"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -43,24 +39,17 @@ func TestRuntimeHTMLIsInertAndPinned(t *testing.T) {
 	if len(csp) < 2 {
 		t.Fatal("no CSP")
 	}
-	policy := html.UnescapeString(csp[1])
-	if !strings.Contains(policy, "default-src 'none'") || !strings.Contains(policy, scriptHash(runtimeJS)) || strings.Count(policy, "sha256-") != 1 {
+	if policy := html.UnescapeString(csp[1]); !strings.Contains(policy, "default-src 'none'") || strings.Count(policy, "sha256-") != 1 || strings.Contains(policy, "connect-src") {
 		t.Errorf("CSP: %s", policy)
-	}
-	scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(s, -1)
-	if len(scripts) != 1 || scripts[0][1] != runtimeJS {
-		t.Errorf("inline scripts: %d", len(scripts))
-	}
-	data := regexp.MustCompile(`(?s)<script type="application/json" id="rt-data">(.*?)</script>`).FindStringSubmatch(s)
-	if len(data) != 2 {
-		t.Fatal("no data block")
 	}
 	var payload struct {
 		A          *report.Analysis   `json:"a"`
+		Base       *report.Analysis   `json:"base"`
 		Comparison *report.Comparison `json:"comparison"`
 	}
-	if err := json.Unmarshal([]byte(data[1]), &payload); err != nil || payload.A.ID != "B2" || payload.Comparison == nil {
-		t.Fatalf("payload: %v", err)
+	pageSection(t, s, "runtime", &payload)
+	if payload.A == nil || payload.A.ID != "B2" || payload.Comparison == nil || payload.Base == nil || payload.Base.ID != "A1" {
+		t.Fatalf("payload: %+v", payload)
 	}
 	if !strings.Contains(payload.A.Label, "<script>") {
 		t.Error("the label should survive as data")
@@ -68,17 +57,5 @@ func TestRuntimeHTMLIsInertAndPinned(t *testing.T) {
 	// No network access: nothing is loaded from elsewhere.
 	if regexp.MustCompile(`(src|href)="(https?:)?//`).MatchString(s) {
 		t.Error("external resource referenced")
-	}
-}
-
-func TestRuntimeJSParses(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed")
-	}
-	f := filepath.Join(t.TempDir(), "runtime.js")
-	os.WriteFile(f, []byte(runtimeJS), 0o644)
-	if out, err := exec.Command(node, "--check", f).CombinedOutput(); err != nil {
-		t.Errorf("runtime.js: %v\n%s", err, out)
 	}
 }

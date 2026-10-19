@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="#interface-web-gitview-serve">Interface web</a> ·
   <a href="#codeaudit-in-english-hacktoberfest-2026">CodeAudit (English)</a> ·
   <a href="#codeaudit-security-journey-s-gitview-audit-modo-security-do-html">CodeAudit</a> ·
   <a href="#repository-graph-a-gitview-graph">Repository Graph</a> ·
@@ -27,7 +28,7 @@ CodeAudit reuses GitView's static analysis (call graph, HTTP routes, data flow, 
 ![A SQL injection finding in the Security Journey: the route, the middleware chain and the handler lead to the query, with the evidence in the inspector](docs/images/codeaudit-sqli.png)
 
 ```sh
-git clone https://github.com/Darrkkens/gitview && cd gitview && go install .   # Go 1.25
+git clone https://github.com/Darrkkens/gitview && cd gitview && go install ./cmd/gitview   # Go 1.25
 
 cd ~/your-go-api
 gitview audit scan                        # static analysis, no AI involved
@@ -57,13 +58,40 @@ Design rules:
 
 The rest of this README is in Portuguese; the CodeAudit section below has the full rule list and its limits.
 
+## Interface web (`gitview serve`)
+
+Dentro de qualquer projeto Go, um comando abre o GitView no navegador, com o projeto mapeado:
+
+```sh
+cd ~/dev/minha-api
+gitview serve                     # abre http://127.0.0.1:<porta>/?t=<token>
+gitview serve ~/dev/api --port 8080 --open=false
+gitview serve --view security     # abre direto no Security Journey
+```
+
+Na TUI (`gitview`), `w` faz o mesmo sem sair do terminal: sobe o servidor e abre o navegador. Ele encerra junto com a TUI.
+
+O servidor escuta só em `127.0.0.1` e a URL impressa traz um token aleatório: só ela abre a página, e a API recusa Host e Origin estranhos. As análises rodam em segundo plano e ficam em cache. Quando o working tree muda, a página oferece analisar de novo. Nada do repositório é executado ou modificado.
+
+| Visão | O que mostra |
+|---|---|
+| Architecture | o Repository Graph navegável: módulos, pacotes, arquivos, tipos, funções, chamadas, com o código-fonte |
+| HTTP | rotas, contratos, exemplos e cURL, e o caminho de cada rota pelo código |
+| Security | o CodeAudit: findings, evidências, revisão e explicações do modelo local (Ollama) |
+| Changes / Tests | os diffs do working tree e o resultado dos testes |
+| Code Flow / Inspector / Study | o call graph, o CFG, o Data Flow e o SQL das funções alteradas, e a ordem de leitura |
+| Runtime | as capturas salvas por `gitview runtime capture` |
+
+A interface é um app React + TypeScript com Tailwind CSS e daisyUI ([`frontend/`](frontend/README.md)), compilado num único HTML que o binário embute. É a mesma página dos relatórios offline (`gitview graph export`, `gitview audit export`, `gitview study`, `x` na TUI, `gitview runtime show -o`): esses arquivos trazem os dados embutidos e não fazem nenhuma requisição de rede.
+
 ## Uso
 
 Monitor de alterações Git em tempo real no terminal. Cada arquivo modificado pode ser expandido ou recolhido individualmente, e os diffs se atualizam sozinhos. Inclui busca global nos diffs, exportação de relatórios, execução de testes, Code Flow e o Go Deep Inspector, para estudar código Go com evidências verificáveis.
 
 ```sh
-go install .
+go install ./cmd/gitview
 gitview [opções] [diretório]
+gitview serve [opções] [diretório]   # a interface web (veja acima)
 ```
 
 | Opção | Descrição |
@@ -98,6 +126,7 @@ Mouse: a roda rola o diff; clicar numa dica do rodapé (por exemplo `x Exportar`
 | `m` | Runtime Performance: mede um processo Go em execução pelo PID |
 | `a` | Repository Graph: o repositório inteiro como grafo navegável (exporta HTML) |
 | `s` | CodeAudit: auditoria de segurança, findings com evidências, Explain with Gemma e revisão |
+| `w` | Interface web no navegador: o mesmo servidor do `gitview serve`, enquanto a TUI estiver aberta |
 | `x` | Exportar relatório |
 | d | Alternar renderização Delta/nativa |
 | r | Atualizar agora (no painel de testes: reexecutar) |
@@ -128,7 +157,8 @@ O relatório HTML, em inglês para ser anexado a Pull Requests, é um arquivo ú
 - Teclado: `/` filtra, `j`/`k` vão para o arquivo seguinte ou anterior, `o` alterna o arquivo atual, e `e`/`c` expandem ou recolhem tudo.
 - Tema escuro e claro (a escolha fica salva), estilos de impressão (tema claro, tudo expandido) e layout para celular.
 - Os testes aparecem como evidência: comando, duração, código de saída, resultados por pacote, falhas e o log completo expansível. Resultados de pacote (por exemplo, falha de compilação) não aparecem como testes individuais.
-- Uma Content-Security-Policy bloqueia qualquer acesso à rede e só permite os scripts do próprio relatório, por hash. Todo conteúdo do repositório passa pelo escape do `html/template`.
+- Uma Content-Security-Policy bloqueia qualquer acesso à rede e só permite o script do próprio relatório, por hash. Os dados vão num bloco JSON inerte, e todo conteúdo do repositório é renderizado como texto.
+- O relatório é a mesma interface do `gitview serve` (as visões Changes, Tests, Code Flow, Inspector e Study), com os dados embutidos.
 
 Escopos: todos os arquivos, arquivo selecionado ou arquivos filtrados pela busca ativa.
 
@@ -560,14 +590,11 @@ Exploração progressiva: a visão inicial mostra só os módulos e os seus dire
 
 Implementação:
 
-- **Layout:** ELK.js 0.11.0 (Eclipse Layout Kernel, EPL-2.0), embutido em `internal/graph/export/assets/vendor` com a licença e o hash do arquivo original. Cada container é organizado separadamente (layered, de cima para baixo), do mais interno para fora, e o resultado fica em cache pelo conteúdo. Expandir um pacote recalcula só ele e os grupos que o contêm, e voltar a uma visão não recalcula nada. Containers com mais de 260 elementos são empacotados sem camadas. Foco e HTTP usam colunas fixas por distância.
-- **Código separado em partes:**
-  - templates `page/*.html` (cabeçalho, sidebar, canvas, inspector, sobreposições);
-  - o design system em `assets/css` (tokens de cor, tipografia e espaçamento, e os estilos de cada componente);
-  - um módulo JavaScript por componente em `assets/js`: dados e hierarquia, código-fonte, layout, renderizador, visões de arquitetura, foco e HTTP, requisições, árvore, inspector, busca, filtros e aplicação.
+- **Layout:** ELK.js 0.11.0 (Eclipse Layout Kernel, EPL-2.0), a dependência `elkjs` do frontend, embutida no build com a licença em [`frontend/licenses`](frontend/licenses/elkjs-EPL-2.0.md). Cada container é organizado separadamente (layered, de cima para baixo), do mais interno para fora, e o resultado fica em cache pelo conteúdo. Expandir um pacote recalcula só ele e os grupos que o contêm, e voltar a uma visão não recalcula nada. Containers com mais de 260 elementos são empacotados sem camadas. Foco e HTTP usam colunas fixas por distância.
+- **Código:** a visão Architecture do app React em [`frontend/src/features/architecture`](frontend/src/features/architecture): decodificação do dataset, layout (ELK), renderizador em canvas 2D, visões de arquitetura e foco, árvore, inspector, busca e filtros, com os componentes do daisyUI. O mesmo app serve o `gitview serve` e todos os relatórios offline.
 - **Código-fonte:** os `.go` que o grafo descreve, e só eles. Ficam dentro do repositório, sem symlinks e até 2 MiB cada, vão compactados (gzip + base64) e só são descompactados quando a aba Source abre. `--include-source=false` exporta sem eles. O FaturAthos (1,98 MB de Go) acrescenta 0,6 MB à página.
-- **Segurança:** a Content-Security-Policy (`default-src 'none'`) permite só os scripts da página, cada um fixado por SHA-256, sem `connect-src` nem workers. Os dados e o código-fonte ficam em blocos inertes, e todo texto do repositório entra na página com `textContent`.
-- **Desempenho**, medido no Chrome headless com o FaturAthos (2.705 nós, 10.253 relações):
+- **Segurança:** a Content-Security-Policy (`default-src 'none'`) permite só o script da página, fixado por SHA-256, sem `connect-src` nem workers. Os dados e o código-fonte ficam em blocos inertes, e todo texto do repositório é renderizado como texto pelo React (um teste impede `innerHTML` e afins no frontend).
+- **Desempenho**, medido no Chrome headless com o FaturAthos (2.705 nós, 10.253 relações) na versão anterior, em JavaScript puro; a versão React usa o mesmo layout e o mesmo renderizador em canvas (no próprio GitView, 3.962 nós, a visão inicial leva cerca de 135 ms de layout):
   - visão inicial em cerca de 120 ms de layout;
   - todos os 36 pacotes expandidos até os arquivos (252 caixas, 978 linhas) em 0,8 s;
   - cada quadro em cerca de 1 ms de JavaScript;
@@ -577,7 +604,7 @@ Limites:
 
 - **Análise estática:** uma linha é uma relação que pode acontecer, não uma execução observada. `implements` só considera interfaces do mesmo módulo. Referências a tipos cobrem campos e assinaturas, não o corpo das funções.
 - **`--max-nodes`:** limita quantos elementos uma expansão pode desenhar. Acima dele, a página sugere abrir o grupo como escopo. O dataset embutido continua completo, e as posições calculadas no Go (Louvain e Fruchterman–Reingold) seguem no JSON.
-- **Tamanho:** o FaturAthos gera 6,9 MB: 5,2 MB de dados, 1,6 MB do ELK e 0,6 MB de código-fonte.
+- **Tamanho:** a interface ocupa 2,5 MB (1,6 MB são do ELK); o resto é o dataset e o código-fonte compactado. O FaturAthos gerava 6,9 MB: 5,2 MB de dados, 1,6 MB do ELK e 0,6 MB de código-fonte.
 - **Navegador:** a aba Source precisa de `DecompressionStream`, presente nos navegadores atuais. Sem ela, a aba avisa, e o resto continua funcionando.
 
 ## Architecture Journey: HTTP Explorer (`gitview graph routes|journey`, aba HTTP do Repository Graph)
@@ -832,12 +859,17 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 
 ## Arquitetura
 
+O repositório segue o layout do [go-blueprint](https://docs.go-blueprint.dev/): `cmd/gitview` é o executável, `internal/` guarda as análises e o servidor, e `frontend/` é a interface web (Vite + React + TypeScript + Tailwind CSS + daisyUI). O build do frontend (`frontend/dist/index.html`, um único arquivo) fica versionado, então `go install` não precisa de Node. Para mexer na interface, `make dev` sobe o `gitview serve` e o Vite com hot reload (veja [`frontend/README.md`](frontend/README.md)). `make web` recompila o build e `make help` lista os alvos.
+
 | Pacote | Responsabilidade |
 |---|---|
 | `internal/gitdiff` | Representação estruturada dos diffs (arquivos, hunks, linhas) |
 | `internal/highlight` | Tokenização Chroma compartilhada pela TUI e pelo HTML |
 | `internal/search` | Busca com índice incremental sobre documentos em memória |
-| `internal/export` | Markdown, HTML e JSON, detecção de dados sensíveis, gravação segura |
+| `internal/export` | Markdown, HTML e JSON, detecção de dados sensíveis, gravação segura; as seções `report` e `runtime` da página |
+| `internal/webui` | Monta as páginas a partir do build do frontend: envelope de dados inerte e Content-Security-Policy com o hash do script |
+| `internal/server` | Servidor local do `gitview serve`: só 127.0.0.1, token, proteção contra DNS rebinding, análises sob demanda com cache, eventos (SSE), gzip |
+| `frontend/` | Interface web: React + TypeScript + Tailwind CSS + daisyUI, um app para todos os relatórios e para o `gitview serve` |
 | `internal/testrunner` | Descoberta, adaptadores Go/Node e executor cancelável |
 | `internal/config` | Leitura de `.gitview.json` |
 | `internal/flow` | Índice de símbolos, call graph (SSA), rotas HTTP, operações de banco, consultas callers/callees, identidade de símbolos compartilhada |
@@ -859,12 +891,12 @@ Quando `tests.projects` está definido, ele substitui a descoberta automática. 
 | `internal/live/srcmap` | Source Mapper: quadros, rotas e chamadas SQL → símbolos do Code Flow e operações do SQL Explorer |
 | `internal/live/capture` | Sessões de captura (fases, pausa, limites) e histórico em disco |
 | `internal/live/report` | Report Engine: análise por fase e por rota, base de cada número, comparação |
-| `internal/graph` | Repository Graph: `model` (schema v1, catálogo HTTP), `analyzer` (Code Flow + go/types → nós e arestas), `httpapi` (contratos HTTP, exemplos, cURL, grafo de execução de rotas), `builder` (merge, graus, Louvain, camadas), `layout`, `export` (JSON, HTML Architecture Explorer com ELK.js, OpenAPI 3.1, Postman v2.1) |
+| `internal/graph` | Repository Graph: `model` (schema v1, catálogo HTTP), `analyzer` (Code Flow + go/types → nós e arestas), `httpapi` (contratos HTTP, exemplos, cURL, grafo de execução de rotas), `builder` (merge, graus, Louvain, camadas), `layout`, `export` (JSON, a seção `graph` da página com o código-fonte compactado, OpenAPI 3.1, Postman v2.1) |
 | `internal/study` | Study Mode: modelo determinístico (arquitetura, ordem de leitura, jornadas, decisões, testes, SQL, desempenho, exercícios) a partir das análises existentes |
 | `internal/pbwire` | Decodificador do formato protobuf (pprof, OTLP) |
 | `collector/`, `collector/pgxtracer` | Módulos opcionais (só biblioteca padrão / pgx) para instrumentar a aplicação |
-| raiz (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector e Runtime Performance e Repository Graph; CLI `flow`, `inspect`, `runtime` e `graph` |
+| `cmd/gitview` (`package main`) | Componentes Bubble Tea: diff, busca, exportação, testes, Code Flow, Go Deep Inspector, Runtime Performance e Repository Graph; CLI `flow`, `inspect`, `runtime`, `graph`, `audit` e `serve` |
 
 ## Licença
 
-[MIT](LICENSE). O ELK.js incluído em `internal/graph/export/assets/vendor/` mantém a própria licença ([EPL-2.0](internal/graph/export/assets/vendor/LICENSE.elk.md)).
+[MIT](LICENSE). O ELK.js embutido no build da interface (`elkjs`) mantém a própria licença ([EPL-2.0](frontend/licenses/elkjs-EPL-2.0.md)).

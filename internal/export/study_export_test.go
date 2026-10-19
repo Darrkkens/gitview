@@ -1,9 +1,6 @@
 package export
 
 import (
-	"encoding/json"
-	"html"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,17 +24,16 @@ func TestStudySectionIsInert(t *testing.T) {
 	if strings.Contains(s, "<script>alert") || strings.Contains(s, "<img src=x") {
 		t.Fatal("hostile markup reached the page")
 	}
-	if !strings.Contains(s, `href="#study" data-section="study"`) || !strings.Contains(html.UnescapeString(s), scriptHash(studyJS)) {
-		t.Error("Study tab or its pinned script missing")
+	var back ReportSection
+	pageSection(t, s, "report", &back)
+	if back.Study == nil || back.Study.ReadingOrder[0].Title != evil {
+		t.Error("study data unreadable")
 	}
-	data := regexp.MustCompile(`(?s)<script type="application/json" id="study-data">(.*?)</script>`).FindStringSubmatch(s)
-	var back study.Model
-	if len(data) != 2 || json.Unmarshal([]byte(data[1]), &back) != nil || back.ReadingOrder[0].Title != evil {
-		t.Error("study data block unreadable")
-	}
-	// Without Study the report is unchanged: no tab, no script.
+	// Without Study the report has no study section.
 	plain, _ := Render(HTML, Report{Project: "p", GeneratedAt: time.Unix(0, 0)})
-	if strings.Contains(string(plain), `id="study"`) || strings.Contains(string(plain), "study-data") {
+	var none ReportSection
+	pageSection(t, string(plain), "report", &none)
+	if none.Study != nil {
 		t.Error("Study present in a report without it")
 	}
 	md, _ := Render(Markdown, r)

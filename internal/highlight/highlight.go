@@ -3,9 +3,7 @@
 package highlight
 
 import (
-	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -120,37 +118,4 @@ func Class(t chroma.TokenType) string {
 		}
 	}
 	return ""
-}
-
-// ThemeCSS returns deterministic CSS rules coloring token classes under the
-// given selector scope, from a named Chroma style (e.g. "catppuccin-latte").
-func ThemeCSS(styleName, scope string) string {
-	st := styles.Get(styleName)
-	type rule struct{ cls, css string }
-	var rules []rule
-	for tt, cls := range chroma.StandardTypes {
-		if cls == "" || tt == chroma.Background {
-			continue
-		}
-		e := st.Get(tt)
-		var css []string
-		if e.Colour.IsSet() {
-			css = append(css, "color:"+e.Colour.String())
-		}
-		if e.Bold == chroma.Yes {
-			css = append(css, "font-weight:600")
-		}
-		if e.Italic == chroma.Yes {
-			css = append(css, "font-style:italic")
-		}
-		if len(css) > 0 {
-			rules = append(rules, rule{cls, strings.Join(css, ";")})
-		}
-	}
-	sort.Slice(rules, func(i, j int) bool { return rules[i].cls < rules[j].cls })
-	var b strings.Builder
-	for _, r := range rules {
-		fmt.Fprintf(&b, "%s .%s{%s}\n", scope, r.cls, r.css)
-	}
-	return b.String()
 }

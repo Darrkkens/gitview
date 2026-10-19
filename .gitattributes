@@ -1,0 +1,3 @@
+# The web UI build (make web) is committed so go install needs no Node.
+frontend/dist/** linguist-generated=true
+frontend/package-lock.json linguist-generated=true

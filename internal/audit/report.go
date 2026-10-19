@@ -152,7 +152,7 @@ func Annotate(g *model.Graph, a *Audit) {
 				ev = append(ev, evidence.Evidence{Kind: evidence.Static, Basis: evidence.BasisStatic, File: e.File, Line: e.Line, SymbolID: e.Symbol, Source: e.Source, Confidence: e.Confidence, Details: e.Text})
 			}
 		}
-		an := model.Annotation{Kind: "security:" + f.RuleID, Severity: f.Severity, Title: f.Title, Details: f.VerdictLabel + " · " + f.ID + " · " + f.Message, Evidence: ev}
+		an := model.Annotation{Kind: "security:" + f.RuleID, Ref: f.ID, Severity: f.Severity, Title: f.Title, Details: f.VerdictLabel + " · " + f.ID + " · " + f.Message, Evidence: ev}
 		if n := idx[f.SymbolID]; n != nil {
 			n.Annotations = append(n.Annotations, an)
 		}
