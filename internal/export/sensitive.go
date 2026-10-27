@@ -36,6 +36,9 @@ func SensitivePath(path string) bool {
 	return false
 }
 
+// SensitiveText reports whether a text looks like it holds a secret.
+func SensitiveText(s string) bool { return sensitiveContent.MatchString(s) }
+
 // SensitiveContent reports whether added or context lines look like secrets.
 func SensitiveContent(f gitdiff.File) bool {
 	for _, h := range f.Hunks {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/athos/gitview/internal/flow"
 	"github.com/athos/gitview/internal/gitdiff"
+	"github.com/athos/gitview/internal/hover"
 	"github.com/athos/gitview/internal/inspect"
 	"github.com/athos/gitview/internal/inspect/perf"
 	"github.com/athos/gitview/internal/inspect/pgexplain"
@@ -65,6 +66,9 @@ type Report struct {
 	Flow        *FlowData    // Go call index for the Code Flow tab; nil when not requested
 	Inspect     *InspectData // Go Deep Inspector; nil when not requested
 	Study       *study.Model // Study Mode; nil when not requested
+	// Hovers describe the identifiers of the code the page shows, for pages
+	// without a server (the live page asks /api/hover); nil when not built.
+	Hovers *hover.Table
 }
 
 // InspectData is the Go Deep Inspector section: results computed when the

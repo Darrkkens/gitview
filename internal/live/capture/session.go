@@ -13,6 +13,7 @@ import (
 	"github.com/athos/gitview/internal/flow"
 	"github.com/athos/gitview/internal/live/goprof"
 	"github.com/athos/gitview/internal/live/httpcol"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/proc"
 )
 
@@ -30,7 +31,10 @@ type Target struct {
 	Collector *httpcol.Collector
 	CollInfo  httpcol.CollectorInfo
 	Endpoints []*goprof.Endpoint
-	Notes     []string
+	// Perf says whether Linux perf can sample the process's CPU from the
+	// outside (no endpoint needed).
+	Perf  linuxperf.Capability
+	Notes []string
 }
 
 // Prepare inspects a process: /proc, the collector's announcement and
@@ -60,6 +64,7 @@ func Prepare(ctx context.Context, fs proc.FS, pid int) (*Target, error) {
 	eps, notes := goprof.Discover(ctx, fs, p, t.Collector)
 	t.Endpoints = eps
 	t.Notes = append(t.Notes, notes...)
+	t.Perf = linuxperf.Detect(ctx, linuxperf.Env{}, p.UID)
 	return t, nil
 }
 
@@ -134,7 +139,12 @@ type Config struct {
 	Endpoint       string // route of interest (request key), informative
 
 	Profile goprof.Plan // Endpoint set by the caller
-	Repo    string      // repository root, recorded for display
+	// Perf samples the CPU with Linux perf during the whole capture when
+	// the target allows it (Target.Perf); otherwise the capture goes on
+	// without it, with a note.
+	Perf     bool
+	PerfFreq int    // samples per second per thread (default 99)
+	Repo     string // repository root, recorded for display
 }
 
 // Phase names.
@@ -169,6 +179,9 @@ type Session struct {
 	proxy       *httpcol.Proxy
 	otlp        *httpcol.OTLPReceiver
 	prof        *goprof.Session
+	perf        *linuxperf.Session
+	perfT0      int64 // CLOCK_MONOTONIC at t0
+	perfNote    string
 	sampler     *proc.Sampler
 	exitErr     error
 	collLast    int64
@@ -227,12 +240,13 @@ func Start(ctx context.Context, store *Store, tg *Target, cfg Config) (*Session,
 		}
 	}
 	now := time.Now()
+	perfT0 := linuxperf.Monotonic()
 	id, dir, err := store.NewDir(now)
 	if err != nil {
 		return nil, err
 	}
 	p := tg.Process
-	s := &Session{store: store, tg: tg, cfg: cfg, t0: now, phase: PhaseBaseline, stopCh: make(chan struct{}), done: make(chan struct{}),
+	s := &Session{store: store, tg: tg, cfg: cfg, t0: now, perfT0: perfT0, phase: PhaseBaseline, stopCh: make(chan struct{}), done: make(chan struct{}),
 		pollStop: make(chan struct{}), pollDone: make(chan struct{}), pageMax: 200}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.cap = &Capture{
@@ -240,7 +254,7 @@ func Start(ctx context.Context, store *Store, tg *Target, cfg Config) (*Session,
 		Process: ProcessInfo{PID: p.PID, Comm: p.Comm, Exe: flow.DisplayPath(p.Exe), ExeDeleted: p.ExeDeleted, StartTicks: p.StartTicks, Started: p.Started,
 			Go: p.Go, GoVersion: p.GoVersion, MainModule: p.MainModule, MainVersion: p.MainVersion, VCSRevision: p.VCSRevision, VCSModified: p.VCSModified,
 			Ports: p.Ports, Unavailable: p.Access.Reasons, CPUs: runtime.NumCPU()},
-		Settings: Settings{Interval: cfg.Interval, Baseline: cfg.Baseline, Duration: cfg.Duration, Cooldown: cfg.Cooldown, MaxDuration: lim.MaxDuration, Endpoint: cfg.Endpoint, Profile: cfg.Profile},
+		Settings: Settings{Interval: cfg.Interval, Baseline: cfg.Baseline, Duration: cfg.Duration, Cooldown: cfg.Cooldown, MaxDuration: lim.MaxDuration, Endpoint: cfg.Endpoint, Profile: cfg.Profile, Perf: onOff(cfg.Perf)},
 		Sources:  []string{"proc"},
 		Notes:    append([]string(nil), tg.Notes...),
 	}
@@ -284,6 +298,9 @@ func Start(ctx context.Context, store *Store, tg *Target, cfg Config) (*Session,
 		s.cap.Settings.OTLP = o.Addr()
 		s.cap.Sources = append(s.cap.Sources, string(httpcol.SourceOTel))
 	}
+	if cfg.Perf {
+		s.startPerf()
+	}
 	go s.sampleLoop()
 	if s.cap.Settings.Collector != "" {
 		go s.pollLoop()
@@ -295,6 +312,55 @@ func Start(ctx context.Context, store *Store, tg *Target, cfg Config) (*Session,
 }
 
 func (s *Session) now() time.Duration { return time.Since(s.t0) }
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// startPerf attaches Linux perf to the process for the whole capture. A
+// perf that is missing or not allowed is noted; the capture goes on.
+func (s *Session) startPerf() {
+	tg := s.tg
+	if !tg.Perf.Available {
+		s.perfNote = "unavailable: " + tg.Perf.Reason
+		s.cap.Notes = append(s.cap.Notes, "Linux perf was not used: "+tg.Perf.Reason+".")
+		return
+	}
+	p := tg.Process
+	ps, err := linuxperf.Start(s.ctx, linuxperf.Options{Cap: tg.Perf, PID: p.PID, Freq: s.cfg.PerfFreq,
+		Verify: func() error { return tg.FS.Verify(p) }, T0: s.perfT0, Dir: s.cap.Dir, Proc: tg.FS.Root}, s.now())
+	if err != nil {
+		s.perfNote = "not started: " + err.Error()
+		s.cap.Warnings = append(s.cap.Warnings, "Linux perf could not sample the process: "+err.Error()+".")
+		return
+	}
+	s.perf = ps
+	s.perfNote = "recording"
+	s.cap.Warnings = append(s.cap.Warnings, tg.Perf.Warnings...)
+	s.cap.Sources = append(s.cap.Sources, "perf")
+}
+
+// stopPerf ends perf and processes its samples (perf script).
+func (s *Session) stopPerf() {
+	s.mu.Lock()
+	ps := s.perf
+	s.perfNote = "processing the samples"
+	s.mu.Unlock()
+	if ps == nil {
+		return
+	}
+	res := ps.Stop(context.Background(), s.now())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cap.Perf = &res
+	s.perfNote = "done"
+	if res.Error != "" {
+		s.cap.Warnings = append(s.cap.Warnings, "Linux perf: "+res.Error+".")
+	}
+}
 
 func (s *Session) addProxy(r httpcol.Request) {
 	s.mu.Lock()
@@ -542,6 +608,9 @@ func (s *Session) finish() {
 	<-s.pollDone
 	if s.isCancelled() {
 		// Nothing is kept: disarm the collector and close the listeners at once.
+		if s.perf != nil {
+			s.perf.Abort()
+		}
 		s.shutdownCollectors()
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -572,6 +641,7 @@ func (s *Session) finish() {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+	s.stopPerf()
 	s.shutdownCollectors()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -692,7 +762,11 @@ type Live struct {
 	Collector string            `json:"collector,omitempty"`
 	OTLP      string            `json:"otlp,omitempty"`
 	Profiling bool              `json:"profiling"`
-	Exited    string            `json:"exited,omitempty"`
+	// PerfSamples counts the CPU samples Linux perf wrote so far (exact);
+	// Perf is perf's state ("" when not requested).
+	PerfSamples int64  `json:"perfSamples"`
+	Perf        string `json:"perf,omitempty"`
+	Exited      string `json:"exited,omitempty"`
 }
 
 // Live returns the current state; it keeps the last n samples and
@@ -701,7 +775,10 @@ func (s *Session) Live(n int) Live {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	l := Live{ID: s.cap.ID, Phase: s.phase, Elapsed: s.now(), Proxy: s.cap.Settings.Proxy, Target: s.cap.Settings.Target,
-		Collector: s.cap.Settings.Collector, OTLP: s.cap.Settings.OTLP, Profiling: s.prof != nil}
+		Collector: s.cap.Settings.Collector, OTLP: s.cap.Settings.OTLP, Profiling: s.prof != nil, Perf: s.perfNote}
+	if s.perf != nil {
+		l.PerfSamples = s.perf.Samples()
+	}
 	if s.phase == PhaseActive || s.phase == PhasePaused {
 		l.Active = s.now() - s.cap.Phases.ActiveStart
 	} else if s.cap.Phases.ActiveEnd > 0 {

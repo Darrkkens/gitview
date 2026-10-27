@@ -42,6 +42,8 @@ export interface CodeViewProps {
   className?: string
   /** Max height of the scroll area (CSS value); none by default. */
   maxHeight?: string
+  /** Repository-relative Go file: its identifiers get hovers (components/Hover). */
+  hoverFile?: string
 }
 
 export const CodeView = memo(function CodeView({
@@ -55,6 +57,7 @@ export const CodeView = memo(function CodeView({
   onLineClick,
   className,
   maxHeight,
+  hoverFile,
 }: CodeViewProps) {
   const rows = useMemo(() => highlightFile(path, text), [path, text])
   const lo = Math.max(1, (from ?? 1) - context)
@@ -95,7 +98,7 @@ export const CodeView = memo(function CodeView({
         >
           {k}
         </td>
-        <td className="pr-4 align-top whitespace-pre">
+        <td className="pr-4 align-top whitespace-pre" data-hl={hoverFile ? k : undefined}>
           {rows[k - 1]?.length ? <Tokens tokens={rows[k - 1]} /> : ' '}
         </td>
       </tr>,
@@ -106,6 +109,7 @@ export const CodeView = memo(function CodeView({
       ref={ref}
       className={cx('scroll-thin overflow-auto rounded-box border border-line bg-code font-mono text-xs leading-5', className)}
       style={maxHeight ? { maxHeight } : undefined}
+      data-hover-file={hoverFile}
     >
       <table className="min-w-full border-collapse">
         <tbody>{lines}</tbody>

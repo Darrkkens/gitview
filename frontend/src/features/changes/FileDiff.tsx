@@ -83,6 +83,7 @@ export const FileDiff = memo(function FileDiff({
       ref={ref}
       id={'gd-' + file.id}
       data-file={file.id}
+      data-hover-file={file.path.endsWith('.go') ? file.path : undefined}
       className={cx(
         'gd-file mb-3 scroll-mt-[var(--gd-top)] rounded-box border border-line bg-code print:break-inside-auto',
         current && 'gd-current',
@@ -350,19 +351,21 @@ const LineRow = memo(function LineRow({
       </td>
       <td className="gd-sg">{SIGN[line.kind]}</td>
       {len > LONG_LINE ? (
-        <LongLine key={String(full)} spans={spans} len={len} full={full} />
+        <LongLine key={String(full)} spans={spans} len={len} full={full} line={line.new} />
       ) : (
-        <td className="gd-cd">{spans.length ? <ChromaSpans spans={spans} /> : ''}</td>
+        <td className="gd-cd" data-hl={line.new || undefined}>
+          {spans.length ? <ChromaSpans spans={spans} /> : ''}
+        </td>
       )}
     </tr>
   )
 })
 
-function LongLine({ spans, len, full }: { spans: DiffLine['spans']; len: number; full: boolean }) {
+function LongLine({ spans, len, full, line }: { spans: DiffLine['spans']; len: number; full: boolean; line: number }) {
   const [all, setAll] = useState(full)
   const cut = useMemo(() => (all ? spans : truncateSpans(spans, LONG_LINE)), [all, spans])
   return (
-    <td className={cx('gd-cd', all && 'gd-wrap')}>
+    <td className={cx('gd-cd', all && 'gd-wrap')} data-hl={line || undefined}>
       <ChromaSpans spans={cut} />
       <button
         type="button"

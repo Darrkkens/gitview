@@ -33,7 +33,7 @@ const (
 	rtHistory
 )
 
-// Capture options shown in the setup view, toggled with 1–7.
+// Capture options shown in the setup view, toggled with 1–8.
 const (
 	optProxy = iota
 	optCollector
@@ -42,10 +42,11 @@ const (
 	optTrace
 	optGoroutine
 	optRuntime
+	optPerf
 	optCount
 )
 
-var optNames = []string{"proxy local (correlaciona requisições)", "collector do GitView (se presente)", "perfil de CPU", "heap e alocações (GC antes/depois)", "execution trace (5 s)", "goroutines no fim", "runtime/metrics (collector)"}
+var optNames = []string{"proxy local (correlaciona requisições)", "collector do GitView (se presente)", "perfil de CPU", "heap e alocações (GC antes/depois)", "execution trace (5 s)", "goroutines no fim", "runtime/metrics (collector)", "Linux perf: CPU por função, sem endpoint"}
 
 var (
 	rtDurations = []time.Duration{0, 10 * time.Second, 30 * time.Second, time.Minute}
@@ -216,6 +217,7 @@ func (m *model) rtUpdate(msg tea.Msg) (tea.Cmd, bool) {
 			r.opts[optRuntime] = false
 		}
 		r.opts[optProxy] = len(msg.t.Process.Ports) > 0
+		r.opts[optPerf] = msg.t.Perf.Available
 	case rtTickMsg:
 		if r.sess == nil {
 			return nil, true
@@ -339,7 +341,7 @@ func (m *model) rtConfig() capture.Config {
 	if !pl.Empty() {
 		pl.Endpoint = r.target.EndpointFor(r.opts[optCollector])
 	}
-	cfg := capture.Config{Duration: rtDurations[r.dur], Interval: rtIntervals[r.every], Proxy: r.opts[optProxy], Collector: r.opts[optCollector], Profile: pl, Repo: m.repo.Root}
+	cfg := capture.Config{Duration: rtDurations[r.dur], Interval: rtIntervals[r.every], Proxy: r.opts[optProxy], Collector: r.opts[optCollector], Profile: pl, Repo: m.repo.Root, Perf: r.opts[optPerf]}
 	if ports := r.target.Process.Ports; r.port >= 0 && r.port < len(ports) {
 		cfg.Target = ports[r.port].Dial()
 	}
@@ -446,9 +448,13 @@ func (m *model) runtimeKey(msg tea.KeyMsg) tea.Cmd {
 		case "esc":
 			r.view = rtProcs
 			return m.rtList()
-		case "1", "2", "3", "4", "5", "6", "7":
+		case "1", "2", "3", "4", "5", "6", "7", "8":
 			i := int(key[0] - '1')
-			if i >= optCPU && r.target.EndpointFor(r.opts[optCollector]) == nil {
+			if i == optPerf && !r.target.Perf.Available {
+				r.setMsg("Linux perf indisponível: "+r.target.Perf.Reason, true)
+				return nil
+			}
+			if i >= optCPU && i != optPerf && r.target.EndpointFor(r.opts[optCollector]) == nil {
 				r.setMsg("No profiling data available: o processo não serve net/http/pprof nem o collector do GitView.", true)
 				return nil
 			}
@@ -870,7 +876,7 @@ func (m *model) runtimeFooter() string {
 	case r.view == rtProcs:
 		hints = []keyHint{{"Enter", "Inspecionar"}, {sym.updown, "Processo"}, {"p", "PID"}, {"r", "Atualizar"}, {"h", "Histórico"}, {"Esc", "Voltar"}}
 	case r.view == rtSetup:
-		hints = []keyHint{{"Enter", "Iniciar captura"}, {"1-7", "Opções"}, {"d", "Duração"}, {"f", "Amostragem"}, {"t", "Porta"}, {"h", "Histórico"}, {"Esc", "Processos"}}
+		hints = []keyHint{{"Enter", "Iniciar captura"}, {"1-8", "Opções"}, {"d", "Duração"}, {"f", "Amostragem"}, {"t", "Porta"}, {"h", "Histórico"}, {"Esc", "Processos"}}
 	case r.view == rtLive:
 		hints = []keyHint{{"Enter", "Encerrar"}, {"Espaço", "Pausar"}, {"x", "Cancelar"}, {"Esc", "Sair da tela (continua)"}}
 	case r.view == rtReport:
@@ -895,7 +901,7 @@ func (m *model) rtIndicator() string {
 var runtimeHelp = []keyHint{
 	{"↑ ↓  Enter", "escolher e inspecionar um processo Go (pelo PID)"},
 	{"p", "informar um PID"},
-	{"1-7  d", "opções da captura e duração da fase ativa"},
+	{"1-8  d", "opções da captura e duração da fase ativa"},
 	{"f  t", "intervalo de amostragem e porta da aplicação atrás do proxy"},
 	{"r", "no relatório, filtra uma rota (alterna até voltar a todas)"},
 	{"Enter", "iniciar / encerrar a captura; no relatório, abrir a função no Deep Inspector"},

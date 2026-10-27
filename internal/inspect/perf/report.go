@@ -171,8 +171,17 @@ func Analyze(p *Profile, progs []*flow.Program, opt Options) (*Report, error) {
 	}
 	st := p.SampleTypes[idx]
 	r := &Report{Kind: kindOf(p), SampleType: st.Type + "/" + st.Unit, Unit: st.Unit, Samples: len(p.Samples), Meaning: meanings[st.Type]}
-	for _, t := range p.SampleTypes {
+	for i, t := range p.SampleTypes {
 		r.SampleTypes = append(r.SampleTypes, t.Type)
+		if t.Type == "samples" && t.Unit == "count" {
+			// Samples with the same stack are stored once, with their count.
+			r.Samples = 0
+			for _, s := range p.Samples {
+				if i < len(s.Values) {
+					r.Samples += int(s.Values[i])
+				}
+			}
+		}
 	}
 	if p.DurationNanos > 0 {
 		r.DurationMs = float64(p.DurationNanos) / 1e6
@@ -430,6 +439,9 @@ func (m *mapper) symbol(name, file string, line int) string {
 }
 
 func (m *mapper) rel(file string) string {
+	if file == "" {
+		return "" // a frame without source (C code, vdso)
+	}
 	for _, p := range m.progs {
 		if r := p.NormFile(file); r != "" && !filepath.IsAbs(r) && !strings.HasPrefix(r, "..") {
 			return r

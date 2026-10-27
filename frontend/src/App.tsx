@@ -1,5 +1,6 @@
 import { Component, Suspense, useEffect, type ReactNode } from 'react'
 import { Header } from './components/Header'
+import { HoverLayer } from './components/Hover'
 import { StatusBar } from './components/StatusBar'
 import { Toaster } from './components/Toast'
 import { EmptyState, ErrorState, Loading } from './components/States'
@@ -64,6 +65,7 @@ export default function App() {
       </div>
       <StatusBar />
       <Toaster />
+      <HoverLayer />
     </div>
   )
 }

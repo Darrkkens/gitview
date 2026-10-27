@@ -64,7 +64,8 @@ function model(g: BranchGraph): { nodes: GNode[]; edges: GEdge[] } {
       last: !bl.reachable,
     }
   })
-  const edges = g.edges.map((e, i): GEdge => ({
+  // (older reports carry null for a function without branches)
+  const edges = (g.edges ?? []).map((e, i): GEdge => ({
     id: 'e' + i,
     from: String(e.from),
     to: String(e.to),
@@ -120,7 +121,7 @@ function Cfg({ b, g, bar }: { b: Bundle; g: BranchGraph; bar: React.ReactNode })
   const highlight = useMemo(() => {
     const p = path >= 0 ? paths[path] : null
     if (!p) return null
-    return { nodes: new Set(p.blocks.map(String)), edges: new Set(p.edges.map((x) => 'e' + x)) }
+    return { nodes: new Set(p.blocks.map(String)), edges: new Set((p.edges ?? []).map((x) => 'e' + x)) }
   }, [path, paths])
 
   const go = (id: number) => {
@@ -280,8 +281,8 @@ function Cfg({ b, g, bar }: { b: Bundle; g: BranchGraph; bar: React.ReactNode })
 }
 
 function BlockDetail({ b, g, bl, go }: { b: Bundle; g: BranchGraph; bl: CfgBlock; go: (id: number) => void }) {
-  const outs = g.edges.filter((e) => e.from === bl.id)
-  const ins = g.edges.filter((e) => e.to === bl.id)
+  const outs = (g.edges ?? []).filter((e) => e.from === bl.id)
+  const ins = (g.edges ?? []).filter((e) => e.to === bl.id)
   const lines = useMemo(() => {
     const out: number[] = []
     for (let l = bl.line; l <= (bl.end || bl.line); l++) out.push(l)
@@ -376,7 +377,7 @@ function BlockDetail({ b, g, bl, go }: { b: Bundle; g: BranchGraph; bl: CfgBlock
       {b.code && (
         <>
           <H4>Code</H4>
-          <FnCode code={b.code} from={b.symbol.line ?? 1} mark={lines} maxHeight="20rem" />
+          <FnCode code={b.code} from={b.symbol.line ?? 1} mark={lines} maxHeight="20rem" file={b.symbol.file} />
         </>
       )}
     </div>

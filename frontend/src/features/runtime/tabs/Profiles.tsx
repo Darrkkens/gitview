@@ -54,16 +54,47 @@ function Profile({
   )
 }
 
+function PerfCPU({ a }: { a: Analysis }) {
+  const P = a.perf!
+  const goCPU = !!a.profiles?.cpu
+  if (!P.cpu) return <Muted className="mt-2">Linux perf recorded no CPU sample in the active phase.</Muted>
+  return (
+    <Profile title={'CPU sampled by Linux perf (' + dur(P.sampledCPU) + ')'} rep={P.cpu} n={15} flame>
+      <Muted className="mb-1">
+        {P.event} at {P.freq} Hz per thread · {P.samples} samples in the active phase ({P.recorded} recorded) · whole
+        process, from outside: no endpoint, no instrumentation
+        {P.stats.foreign ? ' · ' + P.stats.foreign + ' samples in C or system code' : ''}
+      </Muted>
+      {!goCPU && !!a.hotPath?.length && (
+        <div className="mb-2">
+          <H3 className="mt-1">Critical path of the process</H3>
+          <HotPath path={a.hotPath} />
+        </div>
+      )}
+    </Profile>
+  )
+}
+
 export function Profiles({ a }: { a: Analysis }) {
   const PR = a.profiles
   return (
     <>
+      {a.perf && <PerfCPU a={a} />}
+      {(a.perf?.notes ?? []).map((x, i) => (
+        <Muted key={i} className="mt-1.5">
+          {x}
+        </Muted>
+      ))}
       {!PR ? (
-        <Muted>No profiling data available.</Muted>
+        <Muted className={a.perf ? 'mt-4' : ''}>
+          {a.perf
+            ? 'No Go profile (net/http/pprof or the collector): Go heap, goroutines, contention and the execution trace are not available; Linux perf samples CPU only.'
+            : 'No profiling data available.'}
+        </Muted>
       ) : (
         <>
           {PR.cpu ? (
-            <Profile title="CPU" rep={PR.cpu} n={15} flame>
+            <Profile title={a.perf ? 'CPU (Go profile)' : 'CPU'} rep={PR.cpu} n={15} flame>
               <Muted className="mb-1">
                 Total {dur(PR.cpu.total)} in {PR.cpu.samples} samples · {(100 * (PR.cpuCoverage || 0)).toFixed(0)}% of
                 the active phase covered

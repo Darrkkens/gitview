@@ -82,6 +82,8 @@ O servidor escuta só em `127.0.0.1` e a URL impressa traz um token aleatório: 
 | Code Flow / Inspector / Study | o call graph, o CFG, o Data Flow e o SQL das funções alteradas, e a ordem de leitura |
 | Runtime | as capturas salvas por `gitview runtime capture` |
 
+**Hover no código Go**: parar o mouse sobre um identificador no diff de Changes, no código do Inspector ou na aba de código da Architecture e do HTTP mostra o que ele é, como num editor: a assinatura (`func strings.TrimSpace(s string) string`), a documentação, a declaração de structs e interfaces com os comentários dos campos, e onde foi declarado (`$GOROOT/…`, `módulo@versão/…` ou o arquivo do repositório, com link para o Inspector quando a função está lá). Vem da análise `go/types` que o GitView já faz, sem language server. O identificador é localizado por arquivo, linha, coluna e nome: se o arquivo mudou depois da análise, a página diz isso em vez de descrever o código errado. Linhas removidas (a versão antiga) não têm hover. Os relatórios offline com Code Flow, Inspector ou Study trazem os hovers do código que mostram — o lado novo dos diffs e as funções do Inspector —, sem nada de arquivos omitidos como sensíveis e sem o valor de constantes declaradas fora dos arquivos exibidos.
+
 A interface é um app React + TypeScript com Tailwind CSS e daisyUI ([`frontend/`](frontend/README.md)), compilado num único HTML que o binário embute. É a mesma página dos relatórios offline (`gitview graph export`, `gitview audit export`, `gitview study`, `x` na TUI, `gitview runtime show -o`): esses arquivos trazem os dados embutidos e não fazem nenhuma requisição de rede.
 
 ## Uso
@@ -412,7 +414,8 @@ Mede o comportamento de uma aplicação Go **já em execução**, sem benchmarks
 
 | Fonte | Exige | O que fornece | Natureza |
 |---|---|---|---|
-| `/proc/<pid>` | nada (mesmo usuário; de outros usuários, só parte) | CPU (ns por thread via schedstat), RSS, threads, trocas de contexto, E/S, descritores, portas em escuta, versão Go e módulo do binário | **medido**, do processo inteiro |
+| `/proc/<pid>` | nada (mesmo usuário; de outros usuários, só parte) | CPU (ns por thread via schedstat), RSS, memória virtual, threads, trocas de contexto, E/S, descritores, portas em escuta, versão Go e módulo do binário | **medido**, do processo inteiro |
+| Linux perf | `perf` instalado e permitido pelo kernel (`perf_event_paranoid` ≤ 2 para processos próprios, ou `CAP_PERFMON`) | amostras de CPU com pilhas de chamada, de fora do processo: flame graph, funções por amostras, CPU amostrada ao longo do tempo | **amostrado**, do processo inteiro |
 | Proxy local | nada: o cliente envia ao proxy (`127.0.0.1`) | método, caminho (sem query string), status, tempo total e até os cabeçalhos, bytes, `X-GitView-Trace-ID` | **medido** no lado do cliente |
 | Collector do GitView | [`collector`](collector/README.md) na aplicação | padrão da rota, tempo no handler, SQL com a linha que o executou, CPU por requisição (pprof labels), task de trace por requisição, `runtime/metrics` | **medido**; CPU por requisição **amostrada** |
 | `net/http/pprof` | a aplicação já servi-lo | perfis de CPU, heap/alocações, goroutines, mutex, bloqueio e execution trace | **amostrado** (trace: **observado**) |
@@ -420,15 +423,28 @@ Mede o comportamento de uma aplicação Go **já em execução**, sem benchmarks
 
 Métricas do processo valem para o processo inteiro e são rotuladas assim. Números por requisição só aparecem quando há como atribuí-los: tempo e SQL (medidos pelo proxy/collector; sem collector nem OpenTelemetry, o SQL é "não observado", não zero), CPU por requisição (amostras com o label da requisição, só para requisições inteiramente dentro de uma janela do perfil de CPU) e uma estimativa de CPU acima da linha de base para requisições isoladas e mais longas que dois intervalos de amostragem. O que não pode ser coletado aparece como indisponível, com o motivo — por exemplo, bytes de rede por processo, que o Linux não expõe fora de um network namespace próprio.
 
+O relatório separa três números de CPU que não se substituem: a **CPU total do processo** (medida em `/proc`), a **CPU amostrada por função** (perf ou perfil Go) e a **CPU atribuível a requisições** (só com o collector, pelas pprof labels; sem ele, indisponível).
+
+### Linux perf: CPU sem instrumentação
+
+Quando o processo não serve `net/http/pprof` nem tem o collector, o GitView ainda mostra onde a CPU é gasta: o `perf record` roda como subprocesso (sem shell, com os argumentos exibidos antes de começar), preso ao PID escolhido, durante toda a captura, e as amostras são processadas com `perf script` ao final. Nada muda no processo monitorado: ele não é recompilado, reiniciado nem instrumentado.
+
+- **Detecção**: `gitview runtime inspect <pid>` diz se o perf existe, a versão, `perf_event_paranoid`, `kptr_restrict`, se este usuário pode amostrar o processo e por quê. Com `perf_event_paranoid=2` (comum), só o espaço de usuário é amostrado (`cpu-clock:u`): o tempo no kernel aparece na CPU do `/proc`, mas não nas amostras, e o relatório avisa. Com 3 ou mais, ou com um processo de outro usuário, o perf não é usado e a captura segue com as outras fontes. O GitView nunca altera configurações do kernel.
+- **Símbolos Go**: o perf nomeia as funções pela tabela de símbolos ELF; o GitView completa com a `pclntab` do próprio executável (aberta no início da captura e mantida aberta, então continua legível se o binário for recompilado ou o processo terminar) para dar arquivo e linha e para nomear funções de binários compilados com `-ldflags=-s`. Amostras que ninguém consegue nomear aparecem como `[unknown]` e sua proporção é informada. Nos chamadores, a linha é a da chamada (endereço de retorno − 1, como no pprof) e chamadas inlined só aparecem no ponto amostrado.
+- **Tempo**: as amostras usam `CLOCK_MONOTONIC` (`perf record -k monotonic`), o mesmo relógio da captura, então ficam na mesma linha do tempo que `/proc` e as requisições. Cada requisição mostra quantas amostras do processo caíram durante ela; a tabela "com e sem requisições" compara a CPU do processo (medida e amostrada) nos intervalos com e sem requisições em andamento. Nenhum desses números é a CPU de uma requisição.
+- **Limites**: o perf amostra só CPU — heap Go, goroutines, contenção e execution trace continuam exigindo `net/http/pprof` ou o collector. `--no-perf` desliga, `--perf-freq` muda a frequência (padrão 99 Hz por thread). `GITVIEW_PERF=/caminho/absoluto/perf` escolhe o executável.
+
 ### Captura
 
 1. **Linha de base** (padrão 2 s): o processo é medido antes das requisições.
 2. **Fase ativa**: até `Enter`/`Ctrl+C`, `--duration` ou o limite (10 min). Pode ser pausada (`Espaço` na TUI): o intervalo fica fora da análise.
 3. **Pós-captura** (padrão 2 s): o processo continua medido; snapshots finais dos perfis são feitos fora da janela medida.
 
-Os tempos usam o relógio monotônico. O processo é amostrado a cada 250 ms (50 ms–5 s). Se ele terminar ou o PID for reaproveitado, a captura termina, é salva e diz o que aconteceu (e se o mesmo executável voltou com outro PID).
+Os tempos usam o relógio monotônico. O processo é amostrado a cada 250 ms (50 ms–5 s). Se ele terminar ou o PID for reaproveitado, a captura termina, é salva e diz o que aconteceu (e se o mesmo executável voltou com outro PID). O perf para junto com o processo e as amostras já feitas são mantidas.
 
-O relatório traz: CPU e RSS ao longo do tempo com as fases e as requisições marcadas; estatísticas por fase; requisições por rota (p50/p90/p99 por *nearest rank*, status, bytes, concorrência); a rota relacionada à função que a registra e ao handler; SQL por rota com a operação correspondente do SQL Explorer (pela linha de chamada, ou pelo texto); caminho crítico e flame graph das amostras de CPU de cada rota; alocações, contenção, bloqueios e goroutines; métricas do runtime; o que o execution trace mostra de cada requisição (executando, pronta sem P, esperando por motivo, GC simultâneo); e as limitações da captura.
+`--profile` pedido para um processo sem `net/http/pprof` nem collector não interrompe mais a captura: a CPU por função passa a vir do Linux perf (quando disponível) e os perfis que só um desses endpoints fornece são listados como ausentes.
+
+O relatório traz: CPU (de `/proc` e, com perf, amostrada), RSS, memória virtual, threads e descritores ao longo do tempo com as fases e as requisições marcadas; estatísticas por fase; requisições por rota (p50/p90/p99 por *nearest rank*, status, bytes, concorrência); a rota relacionada à função que a registra e ao handler; SQL por rota com a operação correspondente do SQL Explorer (pela linha de chamada, ou pelo texto); caminho crítico, flame graph e funções com mais amostras (perf e perfil Go); CPU do processo com e sem requisições em andamento; caminho crítico e flame graph das amostras de CPU de cada rota; alocações, contenção, bloqueios e goroutines; métricas do runtime; o que o execution trace mostra de cada requisição (executando, pronta sem P, esperando por motivo, GC simultâneo); e as limitações da captura.
 
 ### Comparação
 
@@ -436,17 +452,18 @@ O relatório traz: CPU e RSS ao longo do tempo com as fases e as requisições m
 
 ### Na TUI
 
-`m` abre a tela: `↑↓`/`Enter` escolhe um processo Go deste usuário (`p` digita um PID), `1`–`7` ligam proxy, collector e perfis, `d` define a duração, `f` o intervalo de amostragem, `t` a porta da aplicação atrás do proxy, e `Enter` inicia — com perfis, a lista exata de requisições ao processo aparece antes e só segue com `Enter`. Durante a captura: CPU e RSS em tempo real, endereço do proxy e requisições detectadas; `Enter` encerra, `Espaço` pausa, `x` cancela sem salvar. O indicador `● captura` fica na barra superior nas outras telas. No relatório, `Enter` sobre um handler, uma função do caminho crítico ou uma instrução SQL abre a função no Go Deep Inspector (com o perfil de CPU da captura na aba Performance) e `Esc` volta; `r` filtra uma rota, `e` exporta HTML, `c` compara, `h` abre o histórico (`D` remove).
+`m` abre a tela: `↑↓`/`Enter` escolhe um processo Go deste usuário (`p` digita um PID), `1`–`8` ligam proxy, collector, perfis e o Linux perf, `d` define a duração, `f` o intervalo de amostragem, `t` a porta da aplicação atrás do proxy, e `Enter` inicia — com perfis, a lista exata de requisições ao processo aparece antes e só segue com `Enter`. Durante a captura: CPU e RSS em tempo real, amostras do perf, endereço do proxy e requisições detectadas; `Enter` encerra, `Espaço` pausa, `x` cancela sem salvar. O indicador `● captura` fica na barra superior nas outras telas. No relatório, `Enter` sobre um handler, uma função do caminho crítico ou uma instrução SQL abre a função no Go Deep Inspector (com o perfil de CPU da captura na aba Performance) e `Esc` volta; `r` filtra uma rota, `e` exporta HTML, `c` compara, `h` abre o histórico (`D` remove).
 
 ### Na linha de comando
 
 ```sh
 gitview runtime ps                                   # processos Go deste usuário
 gitview runtime inspect 12345                        # o que pode ser medido nesse processo
-gitview runtime capture 12345                        # proxy local + collector; Enter encerra
+gitview runtime capture 12345                        # proxy local + collector + Linux perf; Enter encerra
 gitview runtime capture 12345 --duration 30s --label "antes do índice"
 gitview runtime capture 12345 --profile cpu,heap,trace --yes -o captura.html
 gitview runtime capture 12345 --otlp 127.0.0.1:4318 --no-proxy
+gitview runtime capture 12345 --no-perf              # sem o Linux perf
 gitview runtime history
 gitview runtime show 20261015-1125 -o relatorio.html  # prefixo do ID basta
 gitview runtime compare <id-antes> <id-depois> -o comparacao.html
@@ -462,6 +479,7 @@ gitview runtime delete <id>
 - Processo em outro network namespace (contêiner): as portas dele não são acessíveis em `127.0.0.1` daqui, então o GitView não as sonda; use `--target` com um endereço que alcance a aplicação.
 - O collector é armado com uma concessão (lease): outra sessão do GitView não consegue desarmá-lo nem mudar taxas de perfil no meio de uma captura.
 - Não exige root. Processos de outros usuários podem ser inspecionados com menos métricas, e o motivo de cada uma indisponível é mostrado.
+- O perf é executado com `exec.CommandContext`, sem shell, num grupo de processos próprio (um `Ctrl+C` no terminal chega ao GitView, que encerra o perf com `SIGINT` e, se ele não sair em 10 s, com `SIGKILL`) e morre junto se o GitView morrer. O PID é conferido (horário de início do processo) antes de o perf começar e de novo depois que ele se anexa. Os dados brutos ficam num diretório temporário exclusivo (`gitview-perf-*`, `0700`), removido ao fim, também em cancelamentos e falhas; só as pilhas processadas ficam na captura (`perf.json.gz`).
 - Nunca são registrados cabeçalhos, cookies, `Authorization`, query strings, corpos, parâmetros de SQL ou literais de SQL (também os de MySQL: `\'`, `"…"`, comentários `#`). Do caminho, só ficam segmentos que são palavras (`clients`, `v2`, `oauth2`); os demais viram `{n}`, `{uuid}`, `{hex}` ou `{value}`.
 - Cada requisição tem um ID próprio, mesmo quando o cliente repete o `traceparent` ou o `X-GitView-Trace-ID`: o trace W3C identifica um trace, não uma requisição. Spans OpenTelemetry sem `process.pid` são ignorados (podem ser de outro serviço), salvo com `--otlp-any-process`; o receptor espera até 6 s após a fase ativa pelos últimos lotes.
 - Profiling só com confirmação explícita (`--yes` sem terminal). CPU e trace ao mesmo tempo, perfis de mutex/bloqueio desligados na aplicação e heap sem GC geram avisos. Um perfil de CPU já em uso no processo é reportado como conflito, não sobrescrito.
@@ -875,6 +893,7 @@ O repositório segue o layout do [go-blueprint](https://docs.go-blueprint.dev/):
 | `internal/flow` | Índice de símbolos, call graph (SSA), rotas HTTP, operações de banco, consultas callers/callees, identidade de símbolos compartilhada |
 | `internal/evidence` | Modelo de evidências (estático, observado, estimado), status de completude, identidade de símbolo, artefatos |
 | `internal/inspect` | Go Deep Inspector: sessão, cache por versão do código, visões por símbolo |
+| `internal/hover` | Hover dos identificadores Go: declaração, assinatura e documentação por `go/types`; tabela para páginas offline |
 | `internal/inspect/dataflow` | Data Flow: def-use do SSA, entre funções, fontes (HTTP, binds do gin/echo, env, linhas do banco), destinos, validações |
 | `internal/audit` | CodeAudit: regras de segurança, findings com evidências e IDs estáveis, associação a rotas, schema das migrações, snapshots, revisões, comparação, dados do relatório |
 | `internal/audit/ai` | AI Security Investigator: cliente Ollama (só loopback sem permissão), Context Builder com orçamento e redação, validação das respostas, cache |
@@ -887,6 +906,7 @@ O repositório segue o layout do [go-blueprint](https://docs.go-blueprint.dev/):
 | `internal/live/proc` | Process Collector: descoberta de processos Go, métricas de `/proc`, permissões, saída e reinício |
 | `internal/live/httpcol` | HTTP Collector: proxy local, cliente do collector, receptor OTLP, junção por `X-GitView-Trace-ID` |
 | `internal/live/goprof` | Go Profiler: descoberta de `net/http/pprof`/collector, janelas de CPU, deltas de heap/mutex/bloqueio, conflitos |
+| `internal/live/linuxperf` | Linux perf: detecção de permissões, `perf record` controlado, `perf script`, símbolos pela `pclntab`, amostras na linha do tempo |
 | `internal/live/tracean` | Trace Analyzer: requisições no execution trace (tasks do collector) |
 | `internal/live/srcmap` | Source Mapper: quadros, rotas e chamadas SQL → símbolos do Code Flow e operações do SQL Explorer |
 | `internal/live/capture` | Sessões de captura (fases, pausa, limites) e histórico em disco |

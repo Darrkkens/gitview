@@ -197,12 +197,15 @@ export function FnCode({
   mark,
   maxHeight = '22rem',
   className,
+  file,
 }: {
   code: string
   from: number
   mark?: number[]
   maxHeight?: string
   className?: string
+  /** Repository-relative file of the code: its identifiers get hovers. */
+  file?: string
 }) {
   const rows = useMemo(() => tokenLines(tokenize(code.replace(/\n$/, ''))), [code])
   const marks = useMemo(() => new Set(mark ?? []), [mark])
@@ -225,6 +228,7 @@ export function FnCode({
         className,
       )}
       style={{ maxHeight }}
+      data-hover-file={file}
     >
       <table className="min-w-full border-collapse">
         <tbody>
@@ -241,7 +245,7 @@ export function FnCode({
                 >
                   {n}
                 </td>
-                <td className="pr-4 align-top whitespace-pre" style={{ tabSize: 4 }}>
+                <td className="pr-4 align-top whitespace-pre" style={{ tabSize: 4 }} data-hl={file ? n : undefined}>
                   {r.length ? <Tokens tokens={r} /> : ' '}
                 </td>
               </tr>

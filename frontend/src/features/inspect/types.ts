@@ -76,8 +76,8 @@ export interface CfgEdge {
 
 export interface CfgPath {
   blocks: number[]
-  edges: number[] // indices into edges
-  steps: string[]
+  edges: number[] | null // indices into edges (null in older reports when empty)
+  steps: string[] | null
   end: number
   exit: string
   error?: boolean
@@ -113,7 +113,7 @@ export interface CoverageSummary {
 export interface BranchGraph {
   symbol: SymbolRef
   blocks: CfgBlock[]
-  edges: CfgEdge[]
+  edges: CfgEdge[] | null // null in older reports for a function without branches
   paths: CfgPath[] | null
   metrics: CfgMetrics
   defers?: CfgStmt[]

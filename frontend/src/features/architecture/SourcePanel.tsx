@@ -153,6 +153,7 @@ function EmbeddedSource({ n, info }: { n: GNode; info: SourcesInfo }) {
       <CodeView
         key={n.id + (whole ? ':whole' : '')}
         path={n.file}
+        hoverFile={n.file}
         text={text}
         from={from}
         to={to}

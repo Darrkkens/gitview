@@ -11,6 +11,7 @@ import (
 	"github.com/athos/gitview/internal/flow"
 	"github.com/athos/gitview/internal/gitdiff"
 	"github.com/athos/gitview/internal/highlight"
+	"github.com/athos/gitview/internal/hover"
 	"github.com/athos/gitview/internal/inspect/perf"
 	"github.com/athos/gitview/internal/live/report"
 	"github.com/athos/gitview/internal/study"
@@ -37,6 +38,7 @@ type ReportSection struct {
 	Flow      *FlowSection `json:"flow,omitempty"`
 	Inspect   *InspectView `json:"inspect,omitempty"`
 	Study     *study.Model `json:"study,omitempty"`
+	Hovers    *hover.Table `json:"hovers,omitempty"`
 }
 
 // DiffFile is a changed file ready to display. ID is the anchor the Code
@@ -124,7 +126,7 @@ func statusLetter(s string) string {
 func NewReportSection(r Report) *ReportSection {
 	s := &ReportSection{Project: r.Project, Branch: r.Branch, Root: r.Root, Base: r.Base, Generated: r.GeneratedAt,
 		Scope: r.Scope, Query: r.Query, Omitted: r.Omitted, Warnings: r.Warnings, Tests: r.Tests, Study: r.Study,
-		Files: []DiffFile{}}
+		Hovers: r.Hovers, Files: []DiffFile{}}
 	s.Added, s.Deleted = r.totals()
 	total := 0
 	anchors := map[string]string{}
@@ -264,18 +266,27 @@ func (s *Span) UnmarshalJSON(b []byte) error {
 // slim drops the parts of the profile reports the page does not show
 // (per-line statistics, call edges), without modifying a.
 func slim(a *report.Analysis) *report.Analysis {
-	if a == nil || a.Profiles == nil {
+	if a == nil || (a.Profiles == nil && a.Perf == nil) {
 		return a
 	}
 	c := *a
-	p := *a.Profiles
-	for _, r := range []**perf.Report{&p.CPU, &p.Allocs, &p.Inuse, &p.Mutex, &p.Block, &p.Goroutines} {
+	var reports []**perf.Report
+	if a.Profiles != nil {
+		p := *a.Profiles
+		c.Profiles = &p
+		reports = append(reports, &p.CPU, &p.Allocs, &p.Inuse, &p.Mutex, &p.Block, &p.Goroutines)
+	}
+	if a.Perf != nil {
+		p := *a.Perf
+		c.Perf = &p
+		reports = append(reports, &p.CPU)
+	}
+	for _, r := range reports {
 		if *r != nil {
 			x := **r
 			x.Lines, x.Edges, x.Evidence = nil, nil, nil
 			*r = &x
 		}
 	}
-	c.Profiles = &p
 	return &c
 }
