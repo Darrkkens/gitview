@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/athos/gitview/internal/export"
+	"github.com/athos/gitview/internal/flow"
 	"github.com/athos/gitview/internal/gitdiff"
 	"github.com/athos/gitview/internal/testrunner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -241,9 +242,11 @@ func (m *model) startExport() tea.Cmd {
 	}
 	return func() tea.Msg {
 		defer cancel()
+		var progs []*flow.Program // the Go analysis, when the export runs one
 		if withStudy {
 			// Study builds on Code Flow and the inspector: one analysis for all three.
-			progs, failures := loadRepoPrograms(ctx, root, cache)
+			var failures []string
+			progs, failures = loadRepoPrograms(ctx, root, cache)
 			sess := inspectSnap.session(root, progs)
 			buildStudyReport(ctx, &report, root, progs, failures, changed, allFiles, sess, inspectSnap.targets(sess, changed))
 			if ctx.Err() != nil {
@@ -262,6 +265,14 @@ func (m *model) startExport() tea.Cmd {
 			if ctx.Err() != nil {
 				return exportDoneMsg{path: path, err: errors.New("exportação cancelada")}
 			}
+		}
+		if format == export.HTML && (progs != nil || withFlow || withInspect) {
+			// Hovers for the code the page shows; the programs are in the
+			// cache when Code Flow or the inspector analysed them.
+			if progs == nil {
+				progs, _ = loadRepoPrograms(ctx, root, cache)
+			}
+			report.Hovers = offlineHovers(progs, &report)
 		}
 		data, err := export.Render(format, report)
 		if err == nil {

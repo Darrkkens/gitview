@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/athos/gitview/internal/config"
 	"github.com/athos/gitview/internal/live/capture"
+	"github.com/athos/gitview/internal/live/goprof"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/report"
 )
 
@@ -211,5 +214,67 @@ func TestStudyCommandWritesReport(t *testing.T) {
 		if !bytes.Contains(html, []byte(want)) {
 			t.Errorf("report missing %q", want)
 		}
+	}
+}
+
+func TestWithoutEndpoint(t *testing.T) {
+	pl := goprof.Plan{CPU: true, Heap: true, Trace: true, CPUWindow: 2 * time.Second}
+	w := withoutEndpoint(&pl, true)
+	if !pl.Empty() || len(w) != 2 || !strings.Contains(w[0], "Linux perf") || !strings.Contains(w[1], "heap, execution trace") {
+		t.Fatalf("plan %+v, warnings %q", pl, w)
+	}
+	pl = goprof.Plan{CPU: true}
+	if w := withoutEndpoint(&pl, false); len(w) != 1 || !strings.Contains(w[0], "indisponível") {
+		t.Fatalf("without perf: %q", w)
+	}
+}
+
+// A process without net/http/pprof nor the collector: --profile no longer
+// aborts the capture; CPU by function comes from Linux perf when it can
+// sample the process, and the capture says what it could not collect.
+func TestRuntimeCLIFallbackWithoutPprof(t *testing.T) {
+	t.Setenv("GITVIEW_CACHE_DIR", t.TempDir())
+	privateRuntimeDir(t)
+	pid, _ := liveApp(t, "-extra", "3ms")
+	app := liveAppDir()
+	perfOK := linuxperf.Detect(context.Background(), linuxperf.Env{}, os.Geteuid()).Available
+
+	var outb bytes.Buffer
+	errb := newSyncBuf()
+	trafficTo(t, errb, "/clients/2", 20)
+	code := runRuntimeIO([]string{"capture", fmt.Sprint(pid), "--duration", "1500ms", "--baseline", "200ms", "--cooldown", "200ms",
+		"--interval", "100ms", "--profile", "cpu,heap", "--non-interactive", "--repo", app, "--json"}, &outb, errb, strings.NewReader(""))
+	errs := errb.String()
+	if code != exitOK {
+		t.Fatalf("capture: %d\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "não há heap nesta captura") {
+		t.Errorf("the missing heap profile is not reported:\n%s", errs)
+	}
+	var a report.Analysis
+	if err := json.Unmarshal(outb.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Profiles != nil {
+		t.Errorf("a Go profile without an endpoint: %+v", a.Profiles)
+	}
+	if !perfOK {
+		if !strings.Contains(errs, "perfil de CPU indisponível") {
+			t.Errorf("the missing CPU profile is not reported:\n%s", errs)
+		}
+		return
+	}
+	if !strings.Contains(errs, "amostrada pelo Linux perf") || !strings.Contains(errs, "amostras") {
+		t.Errorf("perf is not announced or its samples not shown:\n%s", errs)
+	}
+	if a.Perf == nil || a.Perf.CPU == nil || !strings.Contains(strings.Join(a.Sources, ","), "perf") {
+		t.Fatalf("no perf CPU in the capture: sources %v, perf %+v", a.Sources, a.Perf)
+	}
+	html := filepath.Join(t.TempDir(), "r.html")
+	if _, errs, code := runRuntimeCLI(t, "show", a.ID, "--repo", app, "-o", html); code != exitOK {
+		t.Fatalf("show: %d %s", code, errs)
+	}
+	if data, err := os.ReadFile(html); err != nil || !bytes.Contains(data, []byte(`"perf":`)) {
+		t.Errorf("the HTML report has no perf data (%v)", err)
 	}
 }

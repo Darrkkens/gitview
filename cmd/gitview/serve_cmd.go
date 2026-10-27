@@ -19,6 +19,7 @@ import (
 	"github.com/athos/gitview/internal/flow"
 	gexport "github.com/athos/gitview/internal/graph/export"
 	gmodel "github.com/athos/gitview/internal/graph/model"
+	"github.com/athos/gitview/internal/hover"
 	"github.com/athos/gitview/internal/inspect"
 	"github.com/athos/gitview/internal/live/capture"
 	"github.com/athos/gitview/internal/live/report"
@@ -154,6 +155,7 @@ type workspace struct {
 	repoErr error
 	running chan struct{}
 	reviews sync.Mutex
+	hover   *hover.Resolver // identifiers of the report section's analysis
 }
 
 type repoAnalysis struct {
@@ -184,6 +186,7 @@ func (w *workspace) server(view string, changes <-chan struct{}) *server.Server 
 			"POST /api/review":              w.review,
 			"GET /api/runtime/capture/{id}": w.runtimeCapture,
 			"GET /api/runtime/compare":      w.runtimeCompare,
+			"GET /api/hover":                w.hoverAPI,
 		},
 		Changes: changes,
 		// Development only (make dev): a fixed token gives the Vite dev
@@ -344,6 +347,10 @@ func (w *workspace) reportSection(ctx context.Context) (any, error) {
 		}
 		return export.NewReportSection(rep), nil
 	}
+	res := hover.New(progs)
+	w.mu.Lock()
+	w.hover = res
+	w.mu.Unlock()
 	sess := inspect.NewSession(w.root, progs)
 	buildStudyReport(ctx, &rep, w.root, progs, failures, changed, files, sess, sess.Changed(changed))
 	if ctx.Err() != nil {

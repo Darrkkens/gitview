@@ -879,6 +879,7 @@ func (b *builder) finish(g *Graph, opt Options) {
 		b.locate(blk)
 	}
 	g.Blocks = final
+	g.Edges = []*Edge{} // a function without branches has none: [] in JSON, not null
 	for _, blk := range final {
 		for _, e := range blk.succs {
 			e.From, e.To = blk.ID, e.to.ID
@@ -1032,7 +1033,7 @@ func (b *builder) paths(g *Graph, maxPaths int) {
 		if blk.Terminal != "" {
 			count++
 			if len(g.Paths) < maxPaths {
-				p := Path{Blocks: append([]int(nil), cur...), Edges: append([]int(nil), curEdges...),
+				p := Path{Blocks: append([]int(nil), cur...), Edges: append([]int{}, curEdges...),
 					Steps: append([]string(nil), steps...), End: blk.ID, Exit: blk.Terminal}
 				p.Error = blk.ReturnsError || blk.Terminal == TermPanic || blk.Terminal == TermExit
 				for _, ei := range p.Edges {

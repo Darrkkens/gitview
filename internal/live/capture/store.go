@@ -20,6 +20,7 @@ import (
 
 	"github.com/athos/gitview/internal/live/goprof"
 	"github.com/athos/gitview/internal/live/httpcol"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/proc"
 )
 
@@ -98,6 +99,7 @@ type Settings struct {
 	OTLP        string        `json:"otlp,omitempty"`
 	Endpoint    string        `json:"endpoint,omitempty"` // route filter chosen by the user
 	Profile     goprof.Plan   `json:"profile"`
+	Perf        string        `json:"perf,omitempty"` // auto | on | off
 }
 
 // Capture is a finished capture as stored in capture.json.
@@ -118,6 +120,7 @@ type Capture struct {
 	OTelSpans  int                  `json:"otelSpans,omitempty"`
 	Lost       int64                `json:"lost,omitempty"` // requests dropped by the collector's buffer
 	Profiles   *goprof.Result       `json:"profiles,omitempty"`
+	Perf       *linuxperf.Result    `json:"perf,omitempty"`    // CPU sampled by Linux perf
 	TraceAt    time.Time            `json:"traceAt,omitempty"` // wall time the trace was requested
 	Sources    []string             `json:"sources"`
 	Warnings   []string             `json:"warnings,omitempty"`
@@ -388,7 +391,7 @@ func (s *Store) Prune(keep string) {
 // first (trace, then snapshots, then CPU windows), until its directory fits
 // in max bytes (capture.json itself is small). It returns what was removed.
 func enforceSize(c *Capture, max int64) []string {
-	if c.Profiles == nil || dirSize(c.Dir) <= max {
+	if (c.Profiles == nil && c.Perf == nil) || dirSize(c.Dir) <= max {
 		return nil
 	}
 	var dropped []string
@@ -400,16 +403,22 @@ func enforceSize(c *Capture, max int64) []string {
 		w.File, w.Err = "", "removed: the capture exceeded the storage limit"
 		dropped = append(dropped, what)
 	}
-	p := c.Profiles
-	drop(p.Trace, "the execution trace")
-	for _, w := range []*goprof.Window{p.HeapStart, p.HeapEnd} {
-		drop(w, "heap snapshots")
+	if p := c.Profiles; p != nil {
+		drop(p.Trace, "the execution trace")
+		for _, w := range []*goprof.Window{p.HeapStart, p.HeapEnd} {
+			drop(w, "heap snapshots")
+		}
+		for _, w := range []*goprof.Window{p.Goroutine, p.MutexStart, p.MutexEnd, p.BlockStart, p.BlockEnd} {
+			drop(w, "goroutine/mutex/block snapshots")
+		}
+		for i := len(p.CPU) - 1; i >= 0; i-- {
+			drop(&p.CPU[i], "CPU profile windows")
+		}
 	}
-	for _, w := range []*goprof.Window{p.Goroutine, p.MutexStart, p.MutexEnd, p.BlockStart, p.BlockEnd} {
-		drop(w, "goroutine/mutex/block snapshots")
-	}
-	for i := len(p.CPU) - 1; i >= 0; i-- {
-		drop(&p.CPU[i], "CPU profile windows")
+	if c.Perf != nil && c.Perf.File != "" && dirSize(c.Dir) > max {
+		os.Remove(filepath.Join(c.Dir, c.Perf.File))
+		c.Perf.File, c.Perf.Error = "", "removed: the capture exceeded the storage limit"
+		dropped = append(dropped, "the perf samples")
 	}
 	// Each kind once in the message.
 	seen := map[string]bool{}

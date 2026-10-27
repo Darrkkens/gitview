@@ -15,6 +15,7 @@ import (
 	"github.com/athos/gitview/internal/inspect/perf"
 	"github.com/athos/gitview/internal/live/capture"
 	"github.com/athos/gitview/internal/live/httpcol"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/proc"
 	"github.com/athos/gitview/internal/live/report"
 	"github.com/athos/gitview/internal/live/srcmap"
@@ -248,6 +249,18 @@ func renderTarget(t *capture.Target) doc {
 	if len(t.Endpoints) == 0 {
 		d.add(1, spS("– ", sMuted), spS("nenhum endpoint de profiling (net/http/pprof ou collector)", sMuted))
 	}
+	if pf := t.Perf; pf.Available {
+		ev := "cpu-clock"
+		if pf.UserOnly {
+			ev = "cpu-clock:u, só espaço de usuário"
+		}
+		d.add(1, spS("✓ ", sGood), sp("Linux perf "+pf.Version+": CPU por função vista de fora, sem endpoint ("+ev+")"))
+		for _, w := range pf.Warnings {
+			d.add(2, spS(w, sWarn))
+		}
+	} else {
+		d.add(1, spS("– ", sMuted), spS("Linux perf indisponível: "+pf.Reason, sMuted))
+	}
 	d.add(1, spS("✓ ", sGood), sp("proxy local do GitView: correlaciona requisições sem alterar a aplicação"))
 	if len(p.Access.Reasons) > 0 {
 		d.blank()
@@ -288,8 +301,12 @@ func ioPart(p *proc.Process) string {
 // renderCapturePlan describes what a capture will do, for consent.
 func renderCapturePlan(t *capture.Target, cfg capture.Config) []string {
 	var lines []string
+	if cfg.Perf && t.Perf.Available {
+		o := linuxperf.RecordOptions{PID: t.Process.PID, Freq: max(cfg.PerfFreq, 1), UserOnly: t.Perf.UserOnly}
+		lines = append(lines, "Linux perf durante toda a captura: perf "+strings.Join(o.Args(), " ")+" (subprocesso sem shell; não altera o processo; ~1% de CPU a 99 Hz)")
+	}
 	if cfg.Proxy {
-		lines = append(lines, fmt.Sprintf("proxy local em 127.0.0.1 → %s (envie as requisições ao endereço do proxy)", cfg.Target))
+		lines = append(lines, fmt.Sprintf("proxy local em 127.0.0.1 → %s (envie as requisições ao endereço do proxy)", orDefault(cfg.Target, t.DefaultTarget())))
 	}
 	if cfg.Collector && t.Collector != nil {
 		lines = append(lines, "arma o collector do GitView na aplicação (POST /debug/gitview/arm): pprof labels e tasks de trace por requisição; desarmado ao final")
@@ -351,6 +368,13 @@ func renderLive(l capture.Live, width int) doc {
 		d.add(1, spS(fmt.Sprintf("CPU %6.1f %%  ", math.Max(s.CPUPct, 0)), sBold), spS(sparkline(cpu, w), sAccent))
 		d.add(1, spS(fmt.Sprintf("RSS %9s  ", fmtBytes(float64(s.RSS))), sBold), spS(sparkline(rss, w), sAccent))
 		d.add(1, spS(fmt.Sprintf("threads %d · trocas de contexto %d/%d", s.Threads, s.VolCtx, s.InvolCtx), sSubtle))
+	}
+	switch {
+	case l.Perf == "":
+	case strings.HasPrefix(l.Perf, "unavailable") || strings.HasPrefix(l.Perf, "not started"):
+		d.add(1, spS("perf  ", sMuted), spS(l.Perf, sWarn))
+	default:
+		d.add(1, spS("perf  ", sMuted), spS(fmt.Sprintf("%d amostras de CPU", l.PerfSamples), sBold), spS("  "+l.Perf, sSubtle))
 	}
 	d.blank()
 	d.add(0, spS(fmt.Sprintf("Requisições detectadas: %d", l.Requests), sBold))
@@ -461,6 +485,7 @@ func renderAnalysis(a *report.Analysis, route string, width int) doc {
 		d.add(1, spS("RSS  ", sMuted), spS(sparkline(rss, w), sAccent))
 	}
 	d.add(1, spS("resolução da CPU: "+a.Process.CPUResolution, sSubtle))
+	renderCPUViews(&d, a)
 
 	// Routes.
 	d.blank()
@@ -484,6 +509,9 @@ func renderAnalysis(a *report.Analysis, route string, width int) doc {
 	// Profiles.
 	if a.Profiles != nil {
 		renderProfiles(&d, a)
+	}
+	if a.Perf != nil {
+		renderPerf(&d, a)
 	}
 	if a.Runtime != nil && len(a.Runtime.Metrics) > 0 {
 		d.blank()
@@ -685,6 +713,54 @@ func renderProfiles(d *doc, a *report.Analysis) {
 		d.add(1, spS("Goroutines no fim da fase ativa", sAccent), spS(fmt.Sprintf("  %d", p.Goroutines.Total), sSubtle))
 		topProfile(d, p.Goroutines, 5)
 	}
+	for _, n := range p.Notes {
+		d.add(1, spS(n, sMuted))
+	}
+}
+
+// renderCPUViews tells apart the three CPU figures and the correlation
+// with the requests.
+func renderCPUViews(d *doc, a *report.Analysis) {
+	if len(a.CPUViews) > 0 {
+		d.blank()
+		d.add(0, spS("CPU: três medidas diferentes", sBold))
+		for _, m := range a.CPUViews {
+			metricLine(d, 1, m)
+		}
+	}
+	if co := a.Correlation; co != nil {
+		d.blank()
+		d.add(0, spS("Processo com e sem requisições em andamento", sBold), spS("  fase ativa, processo inteiro", sMuted))
+		perfCol := func(v float64) string {
+			if !co.HasPerf {
+				return "–"
+			}
+			return fmt.Sprintf("%.1f%%", v)
+		}
+		d.add(1, spS(fmt.Sprintf("%-22s %8s %12s %14s %10s", "", "tempo", "CPU /proc", "CPU perf", "Δ RSS"), sSubtle))
+		d.add(1, sp(fmt.Sprintf("%-22s %7.1fs %11.1f%% %14s %10s", "com requisições", co.BusySecs, co.BusyCPU, perfCol(co.BusyPerf), fmtBytes(float64(co.BusyRSS)))))
+		d.add(1, sp(fmt.Sprintf("%-22s %7.1fs %11.1f%% %14s %10s", "sem requisições", co.IdleSecs, co.IdleCPU, perfCol(co.IdlePerf), fmtBytes(float64(co.IdleRSS)))))
+		d.add(1, spS("CPU /proc [medido] · CPU perf [amostrado] · "+co.Note, sSubtle))
+	}
+}
+
+// renderPerf renders the CPU sampled by Linux perf.
+func renderPerf(d *doc, a *report.Analysis) {
+	p := a.Perf
+	d.blank()
+	head := fmt.Sprintf("  %s a %d Hz por thread · %d amostras na fase ativa (%d no total) · %s de CPU amostrada", p.Event, p.Freq, p.Samples, p.Recorded, fmtDur(p.SampledCPU))
+	d.add(0, spS("CPU por função (Linux perf)", sBold), spS(head, sMuted))
+	d.add(1, spS("amostrado: amostras × período; vale para o processo inteiro, não para uma requisição", sSubtle))
+	if p.CPU == nil {
+		d.add(1, spS("Nenhuma amostra na fase ativa.", sMuted))
+	} else {
+		topProfile(d, p.CPU, 10)
+		if (a.Profiles == nil || a.Profiles.CPU == nil) && len(a.HotPath) > 0 {
+			d.add(2, spS("caminho crítico do processo:", sMuted))
+			renderHotPath(d, a.HotPath, 3)
+		}
+	}
+	// (its warnings are among the capture's, at the top)
 	for _, n := range p.Notes {
 		d.add(1, spS(n, sMuted))
 	}

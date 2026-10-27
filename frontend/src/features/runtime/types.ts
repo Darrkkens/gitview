@@ -50,6 +50,7 @@ export interface Point {
   t: number // seconds
   cpu: number // % of one core
   rss: number
+  vsz?: number // virtual memory
   threads: number
   fds: number
 }
@@ -195,6 +196,7 @@ export interface RequestRow {
   sql: number // -1: no source of this request can see SQL
   sqlTime: number
   cpu: number // sampled ns, -1 when unknown
+  perfSamples?: number // Linux perf samples of the whole process during the request; -1: no perf data
   inFlight?: number
   sources?: string[]
   error?: string
@@ -231,6 +233,36 @@ export interface Profiles {
   goroutines?: ProfileReport | null
   goroutinesByTrace?: Record<string, number>
   notes?: string[]
+}
+
+/** CPU sampled from the outside by Linux perf (whole process). */
+export interface PerfReport {
+  cpu?: ProfileReport | null
+  event: string
+  freq: number
+  userOnly?: boolean
+  recorded: number
+  samples: number // in the active phase
+  sampledCPU: number // ns, samples × period
+  stats: { samples: number; unknownLeaf: number; broken: number; byPclntab: number; kernel: number; foreign: number }
+  bucketSecs: number
+  timeline?: { t: number; samples: number; cpu: number }[]
+  notes?: string[]
+  warnings?: string[]
+}
+
+/** The process with and without requests in flight (active phase). */
+export interface Correlation {
+  busySecs: number
+  idleSecs: number
+  busyCPU: number
+  idleCPU: number
+  hasPerf: boolean
+  busyPerf: number
+  idlePerf: number
+  busyRSS: number
+  idleRSS: number
+  note: string
 }
 
 export interface RuntimeSeriesPoint {
@@ -325,6 +357,9 @@ export interface Analysis {
   requests?: RequestRow[]
   background?: StatementStats[]
   profiles?: Profiles | null
+  perf?: PerfReport | null
+  cpuViews?: Metric[]
+  correlation?: Correlation | null
   hotPath?: PathStep[]
   runtime?: GoRuntime | null
   trace?: TraceAnalysis | null

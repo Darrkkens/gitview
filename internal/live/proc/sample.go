@@ -29,6 +29,7 @@ type Sample struct {
 	HasMem bool   `json:"hasMem"`
 	RSS    uint64 `json:"rss"`
 	HWM    uint64 `json:"hwm"`
+	VSZ    uint64 `json:"vsz,omitempty"` // virtual memory (VmSize)
 
 	Threads int `json:"threads"`
 
@@ -118,7 +119,7 @@ func (s *Sampler) Sample(now time.Time) (Sample, error) {
 	smp.CPUExact = exact
 
 	if ss, err := s.fs.readStatus(s.pid); err == nil {
-		smp.HasMem, smp.RSS, smp.HWM = true, ss.rss, ss.hwm
+		smp.HasMem, smp.RSS, smp.HWM, smp.VSZ = true, ss.rss, ss.hwm, ss.vsz
 		smp.HasCtx, smp.VolCtx, smp.InvolCtx = true, ss.vol, ss.inv
 		if ss.threads > 0 {
 			smp.Threads = ss.threads
@@ -188,6 +189,25 @@ func (s *Sampler) readTasks() (map[int]uint64, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// Verify checks that p is still the process with its PID: ErrExited when
+// it is gone (or a zombie), ErrRestarted when the PID was reused.
+func (f FS) Verify(p *Process) error {
+	st, err := f.readStat(p.PID)
+	if errors.Is(err, ErrNoProcess) {
+		return ErrExited
+	}
+	if err != nil {
+		return err
+	}
+	if st.startTicks != p.StartTicks {
+		return ErrRestarted
+	}
+	if st.state == "Z" || st.state == "X" {
+		return ErrExited
+	}
+	return nil
 }
 
 // Supported reports whether process monitoring works on this system.

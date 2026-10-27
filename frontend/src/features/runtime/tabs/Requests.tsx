@@ -7,7 +7,7 @@ import { dur, secs, statusTone } from '../fmt'
 import type { Analysis, RequestRow } from '../types'
 import { BasisBadge, H2, Muted } from '../ui'
 
-type SortKey = 'off' | 'key' | 'status' | 'dur' | 'proxy' | 'sql' | 'sqlTime' | 'cpu' | 'inFlight'
+type SortKey = 'off' | 'key' | 'status' | 'dur' | 'proxy' | 'sql' | 'sqlTime' | 'cpu' | 'perfSamples' | 'inFlight'
 
 const PAGE = 100
 
@@ -42,6 +42,8 @@ export function Requests({ a, route }: { a: Analysis; route: string | null }) {
           return r.proxy ?? -1
         case 'inFlight':
           return r.inFlight ?? 0
+        case 'perfSamples':
+          return r.perfSamples ?? -1
         default:
           return r[sort.key]
       }
@@ -56,6 +58,7 @@ export function Requests({ a, route }: { a: Analysis; route: string | null }) {
   }, [rows, sort])
 
   if (!R.length) return <Muted>No request was observed during this capture.</Muted>
+  const hasPerf = !!a.perf
 
   const pages = Math.max(1, Math.ceil(sorted.length / PAGE))
   const pg = Math.min(page, pages - 1)
@@ -155,6 +158,13 @@ export function Requests({ a, route }: { a: Analysis; route: string | null }) {
                 {th('SQL', 'sql', true, 'statements (– when no source of the request sees SQL)')}
                 {th('SQL time', 'sqlTime', true)}
                 {th('CPU (sampled)', 'cpu', true, 'CPU samples attributed to the request (pprof labels)')}
+                {hasPerf &&
+                  th(
+                    'perf (process)',
+                    'perfSamples',
+                    true,
+                    'Linux perf samples of the whole process taken while the request ran: what the process was doing then, not the CPU of this request',
+                  )}
                 {th('in flight', 'inFlight', true, 'requests in flight when it started')}
                 {th('phase', null)}
                 {th('sources', null)}
@@ -202,6 +212,11 @@ export function Requests({ a, route }: { a: Analysis; route: string | null }) {
                     <td className="text-right font-mono whitespace-nowrap tabular-nums">
                       {r.cpu >= 0 ? dur(r.cpu) : '–'}
                     </td>
+                    {hasPerf && (
+                      <td className="text-right font-mono tabular-nums">
+                        {(r.perfSamples ?? -1) >= 0 ? r.perfSamples : '–'}
+                      </td>
+                    )}
                     <td className="text-right font-mono tabular-nums">{r.inFlight || ''}</td>
                     <td>{r.phase}</td>
                     <td className="whitespace-nowrap">{(r.sources ?? []).join('+')}</td>

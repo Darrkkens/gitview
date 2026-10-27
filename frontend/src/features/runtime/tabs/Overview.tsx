@@ -1,8 +1,9 @@
 import { useMemo } from 'react'
 import { ChartBox, PhaseLegend, TimeChart, type Mark } from '../charts'
 import { bytes, dur } from '../fmt'
-import type { Analysis, PhaseStats } from '../types'
+import type { Analysis, Correlation, PhaseStats } from '../types'
 import { BasisBadge, Card, H2, KV, Muted, Swatch, Table, Warn } from '../ui'
+import { Metrics } from './common'
 
 const dash = '–'
 
@@ -13,6 +14,16 @@ export function Overview({ a }: { a: Analysis }) {
   const series = a.process?.series
   const cpu = useMemo(() => (series ?? []).map((p) => [p.t, p.cpu] as [number, number]), [series])
   const rss = useMemo(() => (series ?? []).map((p) => [p.t, p.rss] as [number, number]), [series])
+  const vsz = useMemo(() => (series ?? []).filter((p) => p.vsz).map((p) => [p.t, p.vsz!] as [number, number]), [series])
+  const threads = useMemo(() => (series ?? []).map((p) => [p.t, p.threads] as [number, number]), [series])
+  const fds = useMemo(() => (series ?? []).map((p) => [p.t, p.fds] as [number, number]), [series])
+  // (each slice is drawn at its middle)
+  const perfLine = a.perf?.timeline
+  const half = (a.perf?.bucketSecs ?? 0) / 2
+  const perfCPU = useMemo(
+    () => (perfLine ?? []).map((b) => [b.t + half, b.cpu] as [number, number]),
+    [perfLine, half],
+  )
   const marks: Mark[] = useMemo(
     () =>
       (a.requests ?? []).map((r) => ({
@@ -141,6 +152,43 @@ export function Overview({ a }: { a: Analysis }) {
         />
       </ChartBox>
 
+      {a.perf && perfCPU.length > 1 && (
+        <>
+          <H2 aside={<BasisBadge basis="sampled" />}>CPU sampled by Linux perf (% of one core)</H2>
+          <Muted className="mb-1.5">
+            Whole process, {a.perf.event} at {a.perf.freq} Hz per thread: samples × period in slices of{' '}
+            {a.perf.bucketSecs} s. A statistical estimate of the curve above
+            {a.perf.userOnly ? ', user space only (time in the kernel is missing)' : ''}; it cannot be split by
+            request.
+          </Muted>
+          <ChartBox>
+            <TimeChart
+              points={perfCPU}
+              phases={ph}
+              fmt={(v) => v.toFixed(0) + '%'}
+              color="var(--color-accent)"
+              marks={marks}
+              label="CPU sampled by perf over time"
+              unitLabel="of one core"
+            />
+            <PhaseLegend paused={paused} />
+          </ChartBox>
+        </>
+      )}
+
+      {!!a.cpuViews?.length && (
+        <>
+          <H2>CPU: three different measures</H2>
+          <Muted className="mb-1.5">
+            The process total is measured; CPU by function is sampled; CPU of a request exists only when the collector
+            labels the samples. They are not interchangeable.
+          </Muted>
+          <Metrics rows={a.cpuViews} />
+        </>
+      )}
+
+      {a.correlation && <CorrelationCard c={a.correlation} />}
+
       <H2 aside={<BasisBadge basis="measured" />}>Resident memory (RSS)</H2>
       <ChartBox>
         <TimeChart
@@ -152,6 +200,41 @@ export function Overview({ a }: { a: Analysis }) {
         />
         <PhaseLegend paused={paused} />
       </ChartBox>
+
+      <div className="mt-2 grid gap-2 lg:grid-cols-3">
+        {vsz.length > 1 && (
+          <ChartBox title="virtual memory" aside={<Muted>VmSize</Muted>}>
+            <TimeChart
+              points={vsz}
+              phases={ph}
+              fmt={bytes}
+              color="var(--fg-2)"
+              height={120}
+              label="Virtual memory over time"
+            />
+          </ChartBox>
+        )}
+        <ChartBox title="threads">
+          <TimeChart
+            points={threads}
+            phases={ph}
+            fmt={(v) => v.toFixed(0)}
+            color="var(--color-primary)"
+            height={120}
+            label="Threads over time"
+          />
+        </ChartBox>
+        <ChartBox title="open file descriptors">
+          <TimeChart
+            points={fds}
+            phases={ph}
+            fmt={(v) => v.toFixed(0)}
+            color="var(--color-secondary)"
+            height={120}
+            label="Open file descriptors over time"
+          />
+        </ChartBox>
+      </div>
 
       <H2>Phases</H2>
       <Table<PhaseStats>
@@ -225,6 +308,47 @@ export function Overview({ a }: { a: Analysis }) {
           </div>
         </>
       )}
+    </>
+  )
+}
+
+function CorrelationCard({ c }: { c: Correlation }) {
+  const perf = (v: number) => (c.hasPerf ? v.toFixed(1) + ' %' : dash)
+  const rows = [
+    { name: 'with requests in flight', secs: c.busySecs, cpu: c.busyCPU, perf: c.busyPerf, rss: c.busyRSS },
+    { name: 'without requests', secs: c.idleSecs, cpu: c.idleCPU, perf: c.idlePerf, rss: c.idleRSS },
+  ]
+  return (
+    <>
+      <H2>Process with and without requests</H2>
+      <Table<(typeof rows)[number]>
+        rows={rows}
+        rowKey={(r) => r.name}
+        columns={[
+          { head: 'active phase', cell: (r) => <span className="font-medium">{r.name}</span> },
+          { head: 'time', num: true, cell: (r) => r.secs.toFixed(2) + ' s' },
+          {
+            head: (
+              <span className="inline-flex items-center gap-1">
+                CPU /proc <BasisBadge basis="measured" />
+              </span>
+            ),
+            num: true,
+            cell: (r) => r.cpu.toFixed(1) + ' %',
+          },
+          {
+            head: (
+              <span className="inline-flex items-center gap-1">
+                CPU perf <BasisBadge basis="sampled" />
+              </span>
+            ),
+            num: true,
+            cell: (r) => perf(r.perf),
+          },
+          { head: 'Δ RSS', num: true, cell: (r) => bytes(r.rss) },
+        ]}
+      />
+      <Muted className="mt-1.5">{c.note}</Muted>
     </>
   )
 }

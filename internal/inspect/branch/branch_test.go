@@ -1,6 +1,7 @@
 package branch
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -312,5 +313,30 @@ func TestCompoundErrorConditionHasNoPolarity(t *testing.T) {
 		if g.Block(p.End).Summary() == "return n, nil" && p.Error {
 			t.Errorf("success path marked as error")
 		}
+	}
+}
+
+// A function without branches is a single block: its edges are an empty
+// list in JSON, not null (the web UI maps over them).
+func TestSingleBlockHasEmptyEdges(t *testing.T) {
+	g := build(t, "branches.exists")
+	if len(g.Blocks) != 1 || len(g.Paths) != 1 {
+		t.Fatalf("blocks %d, paths %d", len(g.Blocks), len(g.Paths))
+	}
+	data, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Edges []any `json:"edges"`
+		Paths []struct {
+			Edges []int `json:"edges"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Edges == nil || out.Paths[0].Edges == nil {
+		t.Fatalf("null edges in %s", data)
 	}
 }

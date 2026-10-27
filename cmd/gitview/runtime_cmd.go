@@ -22,6 +22,7 @@ import (
 	"github.com/athos/gitview/internal/live/capture"
 	"github.com/athos/gitview/internal/live/goprof"
 	"github.com/athos/gitview/internal/live/httpcol"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/proc"
 	"github.com/athos/gitview/internal/live/report"
 	"github.com/athos/gitview/internal/live/srcmap"
@@ -44,6 +45,9 @@ captura; o GitView registra o processo e correlaciona as requisições.
 
 Fontes de dados (todas locais):
   /proc            CPU, memória, threads, E/S do processo (sempre)
+  Linux perf       CPU por função vista de fora (perf record), sem endpoint
+                   nem recompilação, quando o perf existe e é permitido
+                   (--no-perf desativa)
   proxy local      127.0.0.1 → aplicação: método, rota, status, tempo, bytes
   collector        github.com/athos/gitview/collector na aplicação: padrão de
                    rota, SQL com linha de origem, CPU por requisição (opcional)
@@ -280,7 +284,7 @@ func (e *runtimeEnv) ps(args []string) int {
 }
 
 func (e *runtimeEnv) inspect(args []string) int {
-	fs := e.flags("inspect", "uso: gitview runtime inspect <pid> [--json]\n\nLê /proc e procura o collector do GitView e net/http/pprof nas portas do\nprocesso (GET /debug/pprof/ e /debug/pprof/cmdline, só leitura).\n\n")
+	fs := e.flags("inspect", "uso: gitview runtime inspect <pid> [--json]\n\nLê /proc, procura o collector do GitView e net/http/pprof nas portas do\nprocesso (GET /debug/pprof/ e /debug/pprof/cmdline, só leitura) e verifica\nse o Linux perf pode amostrar o processo (perf --version e /proc/sys).\n\n")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitUsage
@@ -303,8 +307,9 @@ func (e *runtimeEnv) inspect(args []string) int {
 			Process   *proc.Process          `json:"process"`
 			Collector *httpcol.CollectorInfo `json:"collector,omitempty"`
 			Endpoints []ep                   `json:"endpoints"`
+			Perf      linuxperf.Capability   `json:"perf"`
 			Notes     []string               `json:"notes"`
-		}{Process: tg.Process, Notes: tg.Notes, Endpoints: []ep{}}
+		}{Process: tg.Process, Notes: tg.Notes, Endpoints: []ep{}, Perf: tg.Perf}
 		if tg.Collector != nil {
 			out.Collector = &tg.CollInfo
 		}
@@ -374,6 +379,8 @@ Ctrl+C (Ctrl+C duas vezes cancela sem salvar) ou --duration.
 	noGC := fs.Bool("no-gc", false, "não executa GC antes dos snapshots de heap")
 	setRates := fs.Bool("set-rates", false, "liga perfis de mutex/bloqueio durante a captura (só com o collector)")
 	endpoint := fs.String("endpoint", "", "rota de interesse no relatório (ex.: \"GET /clients/{id}\")")
+	noPerf := fs.Bool("no-perf", false, "não amostra a CPU com o Linux perf")
+	perfFreq := fs.Int("perf-freq", 99, "amostras por segundo por thread do Linux perf (1–999)")
 	fs.BoolVar(&e.yes, "yes", false, "confirma o profiling sem perguntar")
 	fs.BoolVar(&e.nonInter, "non-interactive", false, "nunca pergunta")
 	fs.BoolVar(&e.noSource, "no-source", false, "não relaciona as medições ao código do repositório")
@@ -401,6 +408,9 @@ Ctrl+C (Ctrl+C duas vezes cancela sem salvar) ou --duration.
 	if plan.SetRates && !plan.Mutex && !plan.Block {
 		plan.Mutex, plan.Block = true, true
 	}
+	if *perfFreq < 1 || *perfFreq > 999 {
+		return e.fail(errors.New("--perf-freq deve estar entre 1 e 999"))
+	}
 	tg, err := capture.Prepare(e.ctx, proc.Default, pid)
 	if err != nil {
 		return e.fail(err)
@@ -408,11 +418,17 @@ Ctrl+C (Ctrl+C duas vezes cancela sem salvar) ou --duration.
 	fmt.Fprint(e.stderr, renderTarget(tg).plain())
 	cfg := capture.Config{Label: *label, Interval: *interval, Baseline: *baseline, Duration: *dur, Cooldown: *cooldown,
 		Proxy: !*noProxy && len(tg.Process.Ports) > 0, ProxyListen: *proxyListen, Target: *target, Collector: !*noColl,
-		OTLP: *otlp != "", OTLPListen: *otlp, OTLPAnyProcess: *otlpAny, Endpoint: *endpoint, Profile: plan, Repo: root}
-	if !plan.Empty() {
-		if cfg.Profile.Endpoint = tg.EndpointFor(!*noColl); cfg.Profile.Endpoint == nil {
-			return e.fail(errors.New("profiling pedido, mas o processo não serve net/http/pprof nem o collector do GitView: \"No profiling data available\""))
+		OTLP: *otlp != "", OTLPListen: *otlp, OTLPAnyProcess: *otlpAny, Endpoint: *endpoint, Profile: plan, Repo: root,
+		Perf: !*noPerf, PerfFreq: *perfFreq}
+	if !plan.Empty() && tg.EndpointFor(!*noColl) == nil {
+		// No endpoint: the capture goes on with what is available.
+		for _, w := range withoutEndpoint(&cfg.Profile, cfg.Perf && tg.Perf.Available) {
+			fmt.Fprintln(e.stderr, "aviso: "+w)
 		}
+		plan = cfg.Profile
+	}
+	if !plan.Empty() {
+		cfg.Profile.Endpoint = tg.EndpointFor(!*noColl)
 		if err := cfg.Profile.Validate(); err != nil {
 			return e.fail(err)
 		}
@@ -442,6 +458,9 @@ Ctrl+C (Ctrl+C duas vezes cancela sem salvar) ou --duration.
 	}
 	if live.OTLP != "" {
 		fmt.Fprintf(e.stderr, "Exporte spans OTLP/HTTP para  http://%s\n", live.OTLP)
+	}
+	for _, l := range collectorStates(tg, cfg, live) {
+		fmt.Fprintln(e.stderr, l)
 	}
 	if *dur > 0 {
 		fmt.Fprintf(e.stderr, "Fase ativa de %s depois de %s de linha de base. Ctrl+C encerra antes.\n", *dur, cfg.Baseline)
@@ -477,6 +496,9 @@ loop:
 		case <-tick.C:
 			l := s.Live(1)
 			line := fmt.Sprintf("%s · %s · CPU %.1f%% · RSS %s · %d requisições", phasePT(l.Phase), l.Elapsed.Round(time.Second), maxf(l.Last.CPUPct, 0), fmtBytes(float64(l.Last.RSS)), l.Requests)
+			if l.Perf != "" && !strings.HasPrefix(l.Perf, "unavailable") && !strings.HasPrefix(l.Perf, "not started") {
+				line += fmt.Sprintf(" · perf %d amostras", l.PerfSamples)
+			}
 			if interactive {
 				fmt.Fprintf(e.stderr, "\r\x1b[2K%s", line)
 			} else if int(l.Elapsed.Seconds())%5 == 0 {
@@ -496,7 +518,90 @@ loop:
 		return e.fail(err)
 	}
 	fmt.Fprintf(e.stderr, "Captura %s salva em %s\n", c.ID, flow.DisplayPath(c.Dir))
+	if p := c.Perf; p != nil {
+		line := fmt.Sprintf("Linux perf: %d amostras de CPU", p.Samples)
+		if p.Lost > 0 {
+			line += fmt.Sprintf(" (%d eventos perdidos)", p.Lost)
+		}
+		if p.Error != "" {
+			line += " · " + p.Error
+		}
+		fmt.Fprintln(e.stderr, line)
+	}
 	return e.render(c, root)
+}
+
+// withoutEndpoint adapts a profiling plan to a process that serves
+// neither net/http/pprof nor the collector: the CPU profile is replaced by
+// Linux perf when it can sample the process; every other profile is
+// dropped. It returns the warnings for the user.
+func withoutEndpoint(pl *goprof.Plan, perf bool) []string {
+	var w []string
+	if pl.CPU {
+		if perf {
+			w = append(w, "o processo não serve net/http/pprof nem o collector do GitView: a CPU por função será amostrada pelo Linux perf, sem perfil Go")
+		} else {
+			w = append(w, "perfil de CPU indisponível: o processo não serve net/http/pprof nem o collector, e o Linux perf não pode ser usado (veja acima)")
+		}
+	}
+	var lost []string
+	for _, k := range []struct {
+		on   bool
+		name string
+	}{{pl.Heap, "heap"}, {pl.Goroutine, "goroutines"}, {pl.Mutex, "mutex"}, {pl.Block, "block"}, {pl.Trace, "execution trace"}, {pl.Runtime, "runtime/metrics"}} {
+		if k.on {
+			lost = append(lost, k.name)
+		}
+	}
+	if len(lost) > 0 {
+		w = append(w, "sem net/http/pprof ou collector, não há "+strings.Join(lost, ", ")+" nesta captura (o perf amostra só CPU, não o heap Go)")
+	}
+	*pl = goprof.Plan{CPUWindow: pl.CPUWindow, TraceSeconds: pl.TraceSeconds, HeapGC: pl.HeapGC}
+	return w
+}
+
+// collectorStates says which collectors the capture uses and why the
+// others are off.
+func collectorStates(tg *capture.Target, cfg capture.Config, l capture.Live) []string {
+	var out []string
+	add := func(on bool, name, detail string) {
+		mark := "✓"
+		if !on {
+			mark = "–"
+		}
+		out = append(out, fmt.Sprintf("  %s %-10s %s", mark, name, detail))
+	}
+	add(true, "/proc", "CPU, RSS, memória virtual, threads, E/S, trocas de contexto, descritores")
+	switch {
+	case !cfg.Perf:
+		add(false, "perf", "desativado (--no-perf)")
+	case strings.HasPrefix(l.Perf, "unavailable"):
+		add(false, "perf", "indisponível: "+tg.Perf.Reason)
+	case strings.HasPrefix(l.Perf, "not started"):
+		add(false, "perf", "não iniciado: "+strings.TrimPrefix(l.Perf, "not started: "))
+	default:
+		ev := "cpu-clock"
+		if tg.Perf.UserOnly {
+			ev = "cpu-clock:u (só espaço de usuário)"
+		}
+		add(true, "perf", fmt.Sprintf("%s a %d Hz por thread · %s", ev, max(cfg.PerfFreq, 1), tg.Perf.Bin))
+	}
+	switch {
+	case l.Profiling || !cfg.Profile.Empty():
+		add(true, "pprof", "perfis Go pedidos com --profile")
+	case tg.EndpointFor(cfg.Collector) != nil:
+		add(false, "pprof", "disponível, não pedido (--profile cpu,heap,…)")
+	default:
+		add(false, "pprof", "o processo não serve net/http/pprof")
+	}
+	if l.Collector != "" {
+		add(true, "collector", l.Collector)
+	} else if tg.Collector == nil {
+		add(false, "collector", "não encontrado (opcional)")
+	} else {
+		add(false, "collector", "desativado (--no-collector)")
+	}
+	return out
 }
 
 func maxf(a, b float64) float64 {

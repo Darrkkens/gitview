@@ -57,3 +57,18 @@ export function pct(v: number, digits = 1): string {
 
 /** cx joins class names, skipping falsy values. */
 export const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' ')
+
+/** utf8Length is the number of UTF-8 bytes of s (go/token columns count bytes). */
+export function utf8Length(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      n += 4 // a surrogate pair is one 4-byte character
+      i++
+    } else n += 3
+  }
+  return n
+}

@@ -153,7 +153,7 @@ export function TopFuncs({ rep, n }: { rep: ProfileReport; n: number }) {
         { head: 'cum %', num: true, cell: (f) => f.cumPct.toFixed(1) + ' %' },
         {
           head: 'file',
-          cell: (f) => <span className="font-mono break-all text-fg-3">{f.file ? f.file + ':' + f.line : ''}</span>,
+          cell: (f) => <span className="font-mono break-all text-fg-3">{f.file ? f.file + (f.line ? ':' + f.line : '') : ''}</span>,
         },
       ]}
     />

@@ -213,6 +213,7 @@ export function NodeSource({
       </div>
       <CodeView
         path={n.file}
+        hoverFile={n.file}
         text={text}
         from={from}
         to={to}

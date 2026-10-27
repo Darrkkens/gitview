@@ -195,6 +195,7 @@ func parseStat(data []byte) (stat, error) {
 type status struct {
 	uid      int
 	rss, hwm uint64 // bytes
+	vsz      uint64 // bytes of virtual memory (VmSize)
 	threads  int
 	vol, inv uint64
 }
@@ -223,6 +224,8 @@ func (f FS) readStatus(pid int) (status, error) {
 			st.rss = n * 1024
 		case "VmHWM":
 			st.hwm = n * 1024
+		case "VmSize":
+			st.vsz = n * 1024
 		case "Threads":
 			st.threads = int(n)
 		case "voluntary_ctxt_switches":

@@ -24,6 +24,7 @@ import (
 	"github.com/athos/gitview/internal/live/capture"
 	"github.com/athos/gitview/internal/live/goprof"
 	"github.com/athos/gitview/internal/live/httpcol"
+	"github.com/athos/gitview/internal/live/linuxperf"
 	"github.com/athos/gitview/internal/live/proc"
 	"github.com/athos/gitview/internal/live/srcmap"
 	"github.com/athos/gitview/internal/live/tracean"
@@ -89,6 +90,7 @@ type Point struct {
 	T       float64 `json:"t"` // seconds
 	CPU     float64 `json:"cpu"`
 	RSS     uint64  `json:"rss"`
+	VSZ     uint64  `json:"vsz,omitempty"`
 	Threads int     `json:"threads"`
 	FDs     int     `json:"fds"`
 }
@@ -177,22 +179,25 @@ type RouteStats struct {
 
 // RequestRow is one request in the list.
 type RequestRow struct {
-	ID       string        `json:"id"`
-	Key      string        `json:"key"`
-	Method   string        `json:"method"`
-	Path     string        `json:"path"`
-	Status   int           `json:"status"`
-	Off      time.Duration `json:"off"`
-	Dur      time.Duration `json:"dur"`
-	Proxy    time.Duration `json:"proxy,omitempty"`
-	Phase    string        `json:"phase"`
-	SQL      int           `json:"sql"` // -1: no source of this request can see SQL
-	SQLTime  time.Duration `json:"sqlTime"`
-	CPU      int64         `json:"cpu"` // sampled ns, -1 when unknown
-	InFlight int64         `json:"inFlight,omitempty"`
-	Sources  []string      `json:"sources"`
-	Error    string        `json:"error,omitempty"`
-	Panic    bool          `json:"panic,omitempty"`
+	ID      string        `json:"id"`
+	Key     string        `json:"key"`
+	Method  string        `json:"method"`
+	Path    string        `json:"path"`
+	Status  int           `json:"status"`
+	Off     time.Duration `json:"off"`
+	Dur     time.Duration `json:"dur"`
+	Proxy   time.Duration `json:"proxy,omitempty"`
+	Phase   string        `json:"phase"`
+	SQL     int           `json:"sql"` // -1: no source of this request can see SQL
+	SQLTime time.Duration `json:"sqlTime"`
+	CPU     int64         `json:"cpu"` // sampled ns, -1 when unknown
+	// PerfSamples counts the Linux perf samples of the whole process taken
+	// while the request ran (-1: no perf data); they are not the request's.
+	PerfSamples int      `json:"perfSamples"`
+	InFlight    int64    `json:"inFlight,omitempty"`
+	Sources     []string `json:"sources"`
+	Error       string   `json:"error,omitempty"`
+	Panic       bool     `json:"panic,omitempty"`
 }
 
 // Runtime summarises the runtime/metrics readings of the active phase.
@@ -223,13 +228,18 @@ type Analysis struct {
 	Requests    []RequestRow        `json:"requests"`
 	Background  []StatementStats    `json:"background,omitempty"` // SQL outside requests
 	Profiles    *goprof.Profiles    `json:"profiles,omitempty"`
-	HotPath     []srcmap.PathStep   `json:"hotPath,omitempty"`
-	Runtime     *Runtime            `json:"runtime,omitempty"`
-	Trace       *tracean.Analysis   `json:"trace,omitempty"`
-	Stale       []string            `json:"stale,omitempty"`
-	Limitations []string            `json:"limitations"`
-	Warnings    []string            `json:"warnings,omitempty"`
-	Notes       []string            `json:"notes,omitempty"`
+	Perf        *linuxperf.Report   `json:"perf,omitempty"`
+	// CPUViews are the three CPU figures: process total (measured), CPU
+	// sampled by function, CPU attributable to requests.
+	CPUViews    []Metric          `json:"cpuViews"`
+	Correlation *Correlation      `json:"correlation,omitempty"`
+	HotPath     []srcmap.PathStep `json:"hotPath,omitempty"`
+	Runtime     *Runtime          `json:"runtime,omitempty"`
+	Trace       *tracean.Analysis `json:"trace,omitempty"`
+	Stale       []string          `json:"stale,omitempty"`
+	Limitations []string          `json:"limitations"`
+	Warnings    []string          `json:"warnings,omitempty"`
+	Notes       []string          `json:"notes,omitempty"`
 }
 
 // Analyze builds the report of a capture. mapper may be nil (no source
@@ -266,7 +276,10 @@ func Analyze(c *capture.Capture, mapper *srcmap.Mapper) (*Analysis, error) {
 		}
 		a.Runtime = runtimeStats(c)
 	}
+	perfData := a.analyzePerf(c, progs)
 	a.analyzeRequests(c, cpu, mapper)
+	a.correlate(c, perfData)
+	a.cpuViews(c)
 	a.Background = statements(orphanSpans(c), nil, 0, mapper)
 	a.limitations(c)
 	if mapper != nil {
@@ -283,6 +296,13 @@ func Analyze(c *capture.Capture, mapper *srcmap.Mapper) (*Analysis, error) {
 		}
 		if a.Profiles != nil && a.Profiles.CPU != nil {
 			for _, f := range a.Profiles.CPU.Funcs {
+				if f.Symbol != "" {
+					files = append(files, f.File)
+				}
+			}
+		}
+		if a.Perf != nil && a.Perf.CPU != nil {
+			for _, f := range a.Perf.CPU.Funcs {
 				if f.Symbol != "" {
 					files = append(files, f.File)
 				}
@@ -341,7 +361,7 @@ func processStats(c *capture.Capture) Process {
 		if cpuPct < 0 {
 			cpuPct = 0
 		}
-		p.Series = append(p.Series, Point{T: s.T.Seconds(), CPU: round(cpuPct, 1), RSS: s.RSS, Threads: s.Threads, FDs: s.FDs})
+		p.Series = append(p.Series, Point{T: s.T.Seconds(), CPU: round(cpuPct, 1), RSS: s.RSS, VSZ: s.VSZ, Threads: s.Threads, FDs: s.FDs})
 	}
 	return p
 }
@@ -1043,8 +1063,15 @@ func (a *Analysis) limitations(c *capture.Capture) {
 	if !hasHTTP {
 		add("No HTTP source (proxy, collector or OpenTelemetry) was enabled: requests could not be observed, only the process.")
 	}
-	if c.Profiles == nil || c.Profiles.Plan.Empty() {
+	hasPerf := c.Perf != nil && c.Perf.File != ""
+	switch {
+	case (c.Profiles == nil || c.Profiles.Plan.Empty()) && hasPerf:
+		add("No Go profile was collected (net/http/pprof or GitView's collector): CPU by function comes from Linux perf; Go heap, goroutine and contention profiles and the execution trace need one of those endpoints (perf does not see the Go heap).")
+	case c.Profiles == nil || c.Profiles.Plan.Empty():
 		add("No profile was collected: CPU, memory, goroutine and contention details by function are not available.")
+	}
+	if hasPerf {
+		add("Linux perf samples the whole process: its samples cannot be split by request, only placed on the timeline next to them.")
 	}
 	collector := false
 	for _, s := range c.Sources {

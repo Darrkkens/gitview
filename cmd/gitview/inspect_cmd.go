@@ -1175,6 +1175,9 @@ func (e *inspectEnv) report(args []string) int {
 		rep.Flow = flowIndex(e.sess.Programs(), changed, nil)
 		rep.Inspect = buildInspectData(e.sess, targets)
 	}
+	if f == export.HTML {
+		rep.Hovers = offlineHovers(e.sess.Programs(), &rep)
+	}
 	data, err := export.Render(f, rep)
 	if err != nil {
 		return e.fail(err)

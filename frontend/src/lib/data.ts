@@ -106,16 +106,30 @@ export function useSection<T>(name: SectionName): SectionState<T> {
   return isLive() ? { status: 'loading' } : { status: 'absent' }
 }
 
+/** peekData returns a section's data when it is ready, outside React. */
+export function peekData<T>(name: SectionName): T | undefined {
+  const s = store.sections[name]
+  return s?.status === 'ready' ? (s.data as T) : undefined
+}
+
 /** usePeek returns a section's state without loading it (for tabs). */
 export function usePeek<T>(name: SectionName): SectionState<T> | undefined {
   useSyncExternalStore(subscribe, () => store.version)
   return store.sections[name] as SectionState<T> | undefined
 }
 
+const reloadHooks: (() => void)[] = []
+
+/** onReload registers a cache to clear when an analysis is redone. */
+export function onReload(fn: () => void) {
+  reloadHooks.push(fn)
+}
+
 /** reload asks the server to analyse again (serve mode). */
 export function reload(name: SectionName): Promise<void> {
   resetSources()
   clearHighlightCache()
+  for (const fn of reloadHooks) fn()
   return load(name, true)
 }
 
